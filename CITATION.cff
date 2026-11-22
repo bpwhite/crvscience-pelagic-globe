@@ -1,0 +1,47 @@
+cff-version: 1.2.0
+message: "If you use this software or its validation telemetry, please cite both the software repository and the CRV Science Public Apps Network."
+type: software
+title: "PelagicGlobe: 3D Ocean Currents Globe, Conformal Spilhaus World Ocean Layer & NOAA ENSO Workstation"
+version: "1.1.0"
+date-released: "2026-11-22"
+doi: "10.5281/zenodo.24442089"
+url: "https://crvscience.com/apps"
+repository-code: "https://github.com/bpwhite/crvscience-pelagic-globe"
+license: "GPL-3.0-or-later"
+authors:
+  - family-names: "White"
+    given-names: "Bryan P."
+    affiliation: "CRV Science Labs"
+    orcid: "https://orcid.org/0000-0003-4191-3511"
+keywords:
+  - "oceanography"
+  - "Spilhaus projection"
+  - "ENSO"
+  - "NOAA ERDDAP"
+  - "Rust"
+preferred-citation:
+  type: article
+  title: "PelagicGlobe: 3D Ocean Currents Globe, Conformal Spilhaus World Ocean Projection, and NOAA ENSO Workstation in Rust"
+  authors:
+    - family-names: "White"
+      given-names: "Bryan P."
+      affiliation: "CRV Science Labs"
+      orcid: "https://orcid.org/0000-0003-4191-3511"
+  year: 2026
+  journal: "CRV Science Apps Preprints"
+  doi: "10.5281/zenodo.24442089"
+  url: "https://crvscience.com/apps/preprints/pelagic-globe-3d-ocean-spilhaus-enso"
+  notes: "Preprint ID: APP-PREPRINT-22"
+references:
+  - type: article
+    title: "The CRV Science App Network: Twenty-Two Open-Source Rust Programs for Science, Data, and Simulation"
+    authors:
+      - family-names: "White"
+        given-names: "Bryan P."
+        affiliation: "CRV Science Labs"
+        orcid: "https://orcid.org/0000-0003-4191-3511"
+    year: 2026
+    journal: "CRV Science Apps Preprints"
+    doi: "10.5281/zenodo.24222398"
+    url: "https://crvscience.com/apps/preprints/crv-science-public-apps-network"
+    notes: "Preprint ID: APP-PREPRINT-01 (CRV Science Open-Source Apps Network Overview)"

@@ -1,0 +1,239 @@
+{
+  "app": "PelagicGlobe",
+  "repo": "crvscience-pelagic-globe",
+  "version": "1.1.0",
+  "license": "GPL-3.0-or-later",
+  "repository": "https://github.com/bpwhite/crvscience-pelagic-globe",
+  "binary": "21_Pelagic-Globe.exe",
+  "preprintId": "APP-PREPRINT-22",
+  "slug": "pelagic-globe-3d-ocean-spilhaus-enso",
+  "testsPassed": 12,
+  "testsTotal": 12,
+  "cargo_tests": {
+    "unit_and_cli": 12,
+    "passed": 12,
+    "failed": 0
+  },
+  "unsafeCode": "forbidden_in_library_core_gpl3",
+  "majorCurrentsCount": 14,
+  "oniYearsSpan": "1950-2026",
+  "oniYearlyRows": 921,
+  "spilhausSvgExport": {
+    "velocityVectors": 797,
+    "continentPolylines": 65,
+    "message": "Wrote conformal Spilhaus SVG layer to validation/spilhaus_overlay.svg"
+  },
+  "spilhausRoundTripProbes": [
+    {
+      "name": "San Francisco (California Current)",
+      "inputLonDeg": -122.4194,
+      "inputLatDeg": 37.7749,
+      "spilhausU": 0.702469,
+      "spilhausV": -0.777589,
+      "inverseLonDeg": -122.4194,
+      "inverseLatDeg": 37.7749,
+      "raw": "Input (-122.4194°, 37.7749°) -> Spilhaus norm (+0.702469, -0.777589) -> Inverse (-122.4194°, 37.7749°)"
+    },
+    {
+      "name": "Equatorial Nino 3.4",
+      "inputLonDeg": -145,
+      "inputLatDeg": 0,
+      "spilhausU": 0.41987,
+      "spilhausV": -0.504781,
+      "inverseLonDeg": -145,
+      "inverseLatDeg": 0,
+      "raw": "Input (-145.0000°, 0.0000°) -> Spilhaus norm (+0.419870, -0.504781) -> Inverse (-145.0000°, -0.0000°)"
+    },
+    {
+      "name": "Gulf Stream (Cape Hatteras)",
+      "inputLonDeg": -74,
+      "inputLatDeg": 35.5,
+      "spilhausU": -0.805026,
+      "spilhausV": 0.459217,
+      "inverseLonDeg": -74,
+      "inverseLatDeg": 35.5,
+      "raw": "Input (-74.0000°, 35.5000°) -> Spilhaus norm (-0.805026, +0.459217) -> Inverse (-74.0000°, 35.5000°)"
+    },
+    {
+      "name": "Kuroshio Extension",
+      "inputLonDeg": 145,
+      "inputLatDeg": 34,
+      "spilhausU": 0.77729,
+      "spilhausV": -0.049588,
+      "inverseLonDeg": 145,
+      "inverseLatDeg": 34,
+      "raw": "Input (145.0000°, 34.0000°) -> Spilhaus norm (+0.777290, -0.049588) -> Inverse (145.0000°, 34.0000°)"
+    },
+    {
+      "name": "Southern Ocean Drake Passage",
+      "inputLonDeg": -62,
+      "inputLatDeg": -58,
+      "spilhausU": -0.179412,
+      "spilhausV": -0.330967,
+      "inverseLonDeg": -62,
+      "inverseLatDeg": -58,
+      "raw": "Input (-62.0000°, -58.0000°) -> Spilhaus norm (-0.179412, -0.330967) -> Inverse (-62.0000°, -58.0000°)"
+    },
+    {
+      "name": "Kerguelen Spilhaus Origin",
+      "inputLonDeg": 66.949778,
+      "inputLatDeg": -49.563716,
+      "spilhausU": 0,
+      "spilhausV": 0,
+      "inverseLonDeg": 66.9498,
+      "inverseLatDeg": -49.5637,
+      "raw": "Input (66.9498°, -49.5637°) -> Spilhaus norm (+0.000000, -0.000000) -> Inverse (66.9498°, -49.5637°)"
+    }
+  ],
+  "historicalEnsoPresets": [
+    {
+      "slug": "super-2026",
+      "year": 2026,
+      "season": "ASO",
+      "oniCelsius": 2.5,
+      "phase": "Very Strong ('Super') El Niño",
+      "easternPacific20CIsothermM": 149.2,
+      "verifiedCurrentsLoaded": 14,
+      "raw": "=== PelagicGlobe v1.1.0 Self-Test ===\nOrigin (66.95E, 49.56S) -> Spilhaus (+0.00000000, +0.00000000)\nSeam vertices: 129, 3D morph mesh: 4225 verts / 8192 tris\nEpisode 2026 ASO | Active ONI: +2.5 C (Very Strong ('Super') El Niño) | Eastern Pacific 20C isotherm: 149.2 m\nVerified currents loaded: 14"
+    },
+    {
+      "slug": "strong-2023",
+      "year": 2023,
+      "season": "NDJ",
+      "oniCelsius": 2,
+      "phase": "Very Strong ('Super') El Niño",
+      "easternPacific20CIsothermM": 129.9,
+      "verifiedCurrentsLoaded": 14,
+      "raw": "=== PelagicGlobe v1.1.0 Self-Test ===\nOrigin (66.95E, 49.56S) -> Spilhaus (+0.00000000, +0.00000000)\nSeam vertices: 129, 3D morph mesh: 4225 verts / 8192 tris\nEpisode 2023 NDJ | Active ONI: +2.0 C (Very Strong ('Super') El Niño) | Eastern Pacific 20C isotherm: 129.9 m\nVerified currents loaded: 14"
+    },
+    {
+      "slug": "lanina-2020",
+      "year": 2020,
+      "season": "OND",
+      "oniCelsius": -1.1,
+      "phase": "Moderate La Niña",
+      "easternPacific20CIsothermM": 16,
+      "verifiedCurrentsLoaded": 14,
+      "raw": "=== PelagicGlobe v1.1.0 Self-Test ===\nOrigin (66.95E, 49.56S) -> Spilhaus (+0.00000000, +0.00000000)\nSeam vertices: 129, 3D morph mesh: 4225 verts / 8192 tris\nEpisode 2020 OND | Active ONI: -1.1 C (Moderate La Niña) | Eastern Pacific 20C isotherm: 16.0 m\nVerified currents loaded: 14"
+    },
+    {
+      "slug": "super-2015",
+      "year": 2015,
+      "season": "NDJ",
+      "oniCelsius": 2.6,
+      "phase": "Very Strong ('Super') El Niño",
+      "easternPacific20CIsothermM": 153.1,
+      "verifiedCurrentsLoaded": 14,
+      "raw": "=== PelagicGlobe v1.1.0 Self-Test ===\nOrigin (66.95E, 49.56S) -> Spilhaus (+0.00000000, +0.00000000)\nSeam vertices: 129, 3D morph mesh: 4225 verts / 8192 tris\nEpisode 2015 NDJ | Active ONI: +2.6 C (Very Strong ('Super') El Niño) | Eastern Pacific 20C isotherm: 153.1 m\nVerified currents loaded: 14"
+    },
+    {
+      "slug": "modoki-2009",
+      "year": 2009,
+      "season": "NDJ",
+      "oniCelsius": 1.5,
+      "phase": "Strong El Niño",
+      "easternPacific20CIsothermM": 85.4,
+      "verifiedCurrentsLoaded": 14,
+      "raw": "=== PelagicGlobe v1.1.0 Self-Test ===\nOrigin (66.95E, 49.56S) -> Spilhaus (+0.00000000, +0.00000000)\nSeam vertices: 129, 3D morph mesh: 4225 verts / 8192 tris\nEpisode 2009 NDJ | Active ONI: +1.5 C (Strong El Niño) | Eastern Pacific 20C isotherm: 85.4 m\nVerified currents loaded: 14"
+    },
+    {
+      "slug": "lanina-1999",
+      "year": 1999,
+      "season": "NDJ",
+      "oniCelsius": -1.5,
+      "phase": "Strong La Niña",
+      "easternPacific20CIsothermM": 16,
+      "verifiedCurrentsLoaded": 14,
+      "raw": "=== PelagicGlobe v1.1.0 Self-Test ===\nOrigin (66.95E, 49.56S) -> Spilhaus (+0.00000000, +0.00000000)\nSeam vertices: 129, 3D morph mesh: 4225 verts / 8192 tris\nEpisode 1999 NDJ | Active ONI: -1.5 C (Strong La Niña) | Eastern Pacific 20C isotherm: 16.0 m\nVerified currents loaded: 14"
+    },
+    {
+      "slug": "super-1997",
+      "year": 1997,
+      "season": "NDJ",
+      "oniCelsius": 2.4,
+      "phase": "Very Strong ('Super') El Niño",
+      "easternPacific20CIsothermM": 156.8,
+      "verifiedCurrentsLoaded": 14,
+      "raw": "=== PelagicGlobe v1.1.0 Self-Test ===\nOrigin (66.95E, 49.56S) -> Spilhaus (+0.00000000, +0.00000000)\nSeam vertices: 129, 3D morph mesh: 4225 verts / 8192 tris\nEpisode 1997 NDJ | Active ONI: +2.4 C (Very Strong ('Super') El Niño) | Eastern Pacific 20C isotherm: 156.8 m\nVerified currents loaded: 14"
+    },
+    {
+      "slug": "lanina-1988",
+      "year": 1988,
+      "season": "NDJ",
+      "oniCelsius": -1.8,
+      "phase": "Strong La Niña",
+      "easternPacific20CIsothermM": 16,
+      "verifiedCurrentsLoaded": 14,
+      "raw": "=== PelagicGlobe v1.1.0 Self-Test ===\nOrigin (66.95E, 49.56S) -> Spilhaus (+0.00000000, +0.00000000)\nSeam vertices: 129, 3D morph mesh: 4225 verts / 8192 tris\nEpisode 1988 NDJ | Active ONI: -1.8 C (Strong La Niña) | Eastern Pacific 20C isotherm: 16.0 m\nVerified currents loaded: 14"
+    },
+    {
+      "slug": "super-1982",
+      "year": 1983,
+      "season": "DJF",
+      "oniCelsius": 2.1,
+      "phase": "Very Strong ('Super') El Niño",
+      "easternPacific20CIsothermM": 143.7,
+      "verifiedCurrentsLoaded": 14,
+      "raw": "=== PelagicGlobe v1.1.0 Self-Test ===\nOrigin (66.95E, 49.56S) -> Spilhaus (+0.00000000, +0.00000000)\nSeam vertices: 129, 3D morph mesh: 4225 verts / 8192 tris\nEpisode 1983 DJF | Active ONI: +2.1 C (Very Strong ('Super') El Niño) | Eastern Pacific 20C isotherm: 143.7 m\nVerified currents loaded: 14"
+    },
+    {
+      "slug": "lanina-1973",
+      "year": 1973,
+      "season": "NDJ",
+      "oniCelsius": -2,
+      "phase": "Strong La Niña",
+      "easternPacific20CIsothermM": 16,
+      "verifiedCurrentsLoaded": 14,
+      "raw": "=== PelagicGlobe v1.1.0 Self-Test ===\nOrigin (66.95E, 49.56S) -> Spilhaus (+0.00000000, +0.00000000)\nSeam vertices: 129, 3D morph mesh: 4225 verts / 8192 tris\nEpisode 1973 NDJ | Active ONI: -2.0 C (Strong La Niña) | Eastern Pacific 20C isotherm: 16.0 m\nVerified currents loaded: 14"
+    },
+    {
+      "slug": "neutral-1990",
+      "year": 1960,
+      "season": "DJF",
+      "oniCelsius": 0,
+      "phase": "ENSO Neutral",
+      "easternPacific20CIsothermM": 52.4,
+      "verifiedCurrentsLoaded": 14,
+      "raw": "=== PelagicGlobe v1.1.0 Self-Test ===\nOrigin (66.95E, 49.56S) -> Spilhaus (+0.00000000, +0.00000000)\nSeam vertices: 129, 3D morph mesh: 4225 verts / 8192 tris\nEpisode 1960 DJF | Active ONI: +0.0 C (ENSO Neutral) | Eastern Pacific 20C isotherm: 52.4 m\nVerified currents loaded: 14"
+    }
+  ],
+  "erddapLiveFetch2015_12_15": {
+    "sourceLabel": "NOAA OISST v2.1 Historical SST (Analytical Currents, stride 8)",
+    "width": 180,
+    "height": 90,
+    "validOceanCells": 10741,
+    "timestampUtc": "2015-12-15T12:00:00Z",
+    "raw": "Fetched NOAA OISST v2.1 Historical SST (Analytical Currents, stride 8) (180x90, 10741 valid ocean cells, timestamp=2015-12-15T12:00:00Z)\n=== PelagicGlobe v1.1.0 Self-Test ===\nOrigin (66.95E, 49.56S) -> Spilhaus (+0.00000000, +0.00000000)\nSeam vertices: 129, 3D morph mesh: 4225 verts / 8192 tris\nEpisode 2026 ASO | Active ONI: +2.5 C (Very Strong ('Super') El Niño) | Eastern Pacific 20C isotherm: 149.2 m\nVerified currents loaded: 14"
+  },
+  "headless_screenshots": [
+    {
+      "view": 1,
+      "mode": "3D Globe (1997 OND Super El Nino)",
+      "file": "validation/headless_screenshot.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 874509
+    },
+    {
+      "view": 2,
+      "mode": "2D World Map (2015 NDJ Super El Nino + Warm Blob)",
+      "file": "validation/headless_screenshot_2.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 899420
+    },
+    {
+      "view": 3,
+      "mode": "Conformal Spilhaus World Ocean Square (1973 NDJ La Nina)",
+      "file": "validation/headless_screenshot_3.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 816733
+    }
+  ],
+  "screenshots": [
+    "validation/headless_screenshot.png",
+    "validation/headless_screenshot_2.png",
+    "validation/headless_screenshot_3.png"
+  ]
+}
