@@ -271,7 +271,22 @@ pub const MAJOR_CURRENTS: &[MajorCurrent] = &[
 ];
 
 /// Evaluates the ENSO-coupled surface velocity `(u_east_ms, v_north_ms)` at `(lon_deg, lat_deg)`.
+///
+/// Excludes subsurface currents (`ThermalRegime::SubsurfaceEquatorial`, such as the
+/// Cromwell Equatorial Undercurrent at `91–200 m`) so surface drifters and maps remain
+/// physically faithful to the mixed-layer surface ocean.
 pub fn sample_velocity_ms(lon_deg: f64, lat_deg: f64, oni: f64) -> (f64, f64) {
+    sample_velocity_at_depth_ms(lon_deg, lat_deg, oni, false)
+}
+
+/// Evaluates the ENSO-coupled velocity `(u_east_ms, v_north_ms)` at `(lon_deg, lat_deg)`
+/// with optional inclusion of equatorial subsurface undercurrents (`include_subsurface`).
+pub fn sample_velocity_at_depth_ms(
+    lon_deg: f64,
+    lat_deg: f64,
+    oni: f64,
+    include_subsurface: bool,
+) -> (f64, f64) {
     let mut u = 0.0;
     let mut v = 0.0;
 
@@ -285,8 +300,12 @@ pub fn sample_velocity_ms(lon_deg: f64, lat_deg: f64, oni: f64) -> (f64, f64) {
         u += -0.28 * (3.2 * lat_rad).cos() * lat_rad.cos();
     }
 
-    // Add Gaussian jet filaments along all 14 verified major currents
+    // Add Gaussian jet filaments along major currents (taking minimum-distance segment per current
+    // to eliminate shared-vertex Gaussian double-counting, with cos(lat) spherical metric weighting).
     for cur in MAJOR_CURRENTS {
+        if !include_subsurface && cur.regime == ThermalRegime::SubsurfaceEquatorial {
+            continue;
+        }
         let mut scale = 1.0;
         if cur.id == "sec_pacific" {
             // Weakens & reverses in western/central Pacific during strong El Niño
@@ -299,6 +318,7 @@ pub fn sample_velocity_ms(lon_deg: f64, lat_deg: f64, oni: f64) -> (f64, f64) {
             scale = (1.0 - 0.18 * oni).clamp(0.45, 1.45);
         }
 
+        let mut best_seg: Option<(f64, f64, f64)> = None;
         for seg in cur.waypoints.windows(2) {
             let (mut x0, y0) = seg[0];
             let (mut x1, y1) = seg[1];
@@ -319,18 +339,28 @@ pub fn sample_velocity_ms(lon_deg: f64, lat_deg: f64, oni: f64) -> (f64, f64) {
 
             let dx = x1 - x0;
             let dy = y1 - y0;
-            let len2 = dx * dx + dy * dy + 1.0e-6;
-            let t = (((px - x0) * dx + (lat_deg - y0) * dy) / len2).clamp(0.0, 1.0);
+            let mid_cos = (0.5 * (y0 + y1)).to_radians().cos().max(0.15);
+            let dx_m = dx * mid_cos;
+            let dy_m = dy;
+            let len2_m = dx_m * dx_m + dy_m * dy_m + 1.0e-6;
+            let t = (((px - x0) * mid_cos * dx_m + (lat_deg - y0) * dy_m) / len2_m).clamp(0.0, 1.0);
             let cx = x0 + t * dx;
             let cy = y0 + t * dy;
             let dist2 = ((px - cx) * lat_rad.cos()).powi(2) + (lat_deg - cy).powi(2);
+
+            if best_seg.map(|(bd, _, _)| dist2 < bd).unwrap_or(true) {
+                best_seg = Some((dist2, dx_m, dy_m));
+            }
+        }
+
+        if let Some((dist2, dx_m, dy_m)) = best_seg {
             let sigma2 = 34.0; // ~5.8 deg jet half-width
             if dist2 < 4.5 * sigma2 {
                 let w = (-0.5 * dist2 / sigma2).exp();
-                let norm = (dx * dx + dy * dy).sqrt().max(1.0e-4);
+                let norm_m = (dx_m * dx_m + dy_m * dy_m).sqrt().max(1.0e-4);
                 let speed = 0.62 * cur.peak_speed_ms * scale * w;
-                u += speed * (dx / norm);
-                v += speed * (dy / norm);
+                u += speed * (dx_m / norm_m);
+                v += speed * (dy_m / norm_m);
             }
         }
     }
@@ -352,5 +382,20 @@ mod tests {
         let (u_necc_neutral, _) = sample_velocity_ms(-145.0, 7.0, 0.0);
         let (u_necc_super, _) = sample_velocity_ms(-145.0, 7.0, 2.5);
         assert!(u_necc_super > u_necc_neutral, "NECC must intensify eastward in El Niño");
+    }
+
+    #[test]
+    fn surface_velocity_excludes_cromwell_euc_and_gives_westward_sec() {
+        let (u_surf, _v_surf) = sample_velocity_ms(-150.0, -3.0, 0.0);
+        assert!(
+            u_surf < -0.35,
+            "Surface sample at (-150, -3, 0.0) must exclude Cromwell EUC and yield net westward SEC (got u={u_surf:.3})"
+        );
+        let (u_sub, _) = sample_velocity_at_depth_ms(-150.0, 0.0, 0.0, true);
+        let (u_eq_surf, _) = sample_velocity_ms(-150.0, 0.0, 0.0);
+        assert!(
+            u_sub > u_eq_surf + 0.5,
+            "Including subsurface Cromwell EUC should add strong eastward velocity on equator"
+        );
     }
 }

@@ -19,7 +19,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
 use crate::currents::sample_velocity_ms;
-use crate::enso::{equatorial_20c_isotherm_depth_m, spatial_sst_anomaly_c};
+use crate::enso::{spatial_sst_anomaly_c, tropical_pacific_20c_isotherm_depth_m};
 use crate::spilhaus::spilhaus_norm_to_lonlat;
 
 #[repr(C)]
@@ -54,7 +54,8 @@ pub fn build_spilhaus_globe_mesh(subdivisions: usize, oni: f64) -> (Vec<GlobeVer
             let anom = spatial_sst_anomaly_c(lon_deg, lat_deg, oni) as f32;
             let (u_ms, v_ms) = sample_velocity_ms(lon_deg, lat_deg, oni);
             let speed = (u_ms * u_ms + v_ms * v_ms).sqrt() as f32;
-            let thermo = equatorial_20c_isotherm_depth_m(lon_deg.rem_euclid(360.0), oni) as f32;
+            let thermo = tropical_pacific_20c_isotherm_depth_m(lon_deg, lat_deg, 2026, oni)
+                .unwrap_or(-1.0) as f32;
 
             vertices.push(GlobeVertex {
                 sphere_pos: pos.to_array(),
@@ -104,6 +105,7 @@ struct VertexOutput {
     @location(2) spilhaus_uv: vec2<f32>,
     @location(3) sst_speed: vec2<f32>,
     @location(4) lat_deg: f32,
+    @location(5) thermocline_m: f32,
 };
 
 @vertex
@@ -120,6 +122,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.spilhaus_uv = in.spilhaus_uv;
     out.sst_speed = in.sst_anom_and_speed;
     out.lat_deg = in.lon_lat_deg.y;
+    out.thermocline_m = in.thermocline_m;
     return out;
 }
 
@@ -132,15 +135,45 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let spec = pow(max(dot(in.normal, half_vec), 0.0), 42.0) * 0.28;
     let fresnel = pow(1.0 - max(dot(in.normal, view_dir), 0.0), 3.4) * 0.24;
 
+    let data_layer = i32(round(u_scene.morph_overlay_layer_time.z));
     var base = vec3<f32>(0.04, 0.16, 0.30);
-    let anom = in.sst_speed.x;
-    if (anom >= 0.0) {
-        base = mix(base, vec3<f32>(0.96, 0.34, 0.16), clamp(anom / 2.8, 0.0, 1.0));
+    if (data_layer == 1) {
+        let t = clamp(in.sst_speed.y / 1.4, 0.0, 1.0);
+        if (t < 0.5) {
+            base = mix(vec3<f32>(0.031, 0.094, 0.212), vec3<f32>(0.094, 0.604, 0.737), t * 2.0);
+        } else {
+            base = mix(vec3<f32>(0.094, 0.604, 0.737), vec3<f32>(0.980, 0.800, 0.082), (t - 0.5) * 2.0);
+        }
+    } else if (data_layer == 2) {
+        let lat_cos = max(cos(radians(in.lat_deg)), 0.0001);
+        let sst_c = clamp(28.5 * pow(lat_cos, 1.35) - 1.6 + in.sst_speed.x, -2.0, 33.5);
+        let t = clamp((sst_c + 2.0) / 34.0, 0.0, 1.0);
+        if (t < 0.5) {
+            base = mix(vec3<f32>(0.063, 0.125, 0.384), vec3<f32>(0.078, 0.580, 0.635), t * 2.0);
+        } else {
+            base = mix(vec3<f32>(0.078, 0.580, 0.635), vec3<f32>(0.965, 0.424, 0.243), (t - 0.5) * 2.0);
+        }
+    } else if (data_layer == 3) {
+        if (in.thermocline_m < 0.0) {
+            base = vec3<f32>(0.055, 0.102, 0.173);
+        } else {
+            let t = clamp((in.thermocline_m - 20.0) / 170.0, 0.0, 1.0);
+            if (t < 0.5) {
+                base = mix(vec3<f32>(0.110, 0.133, 0.424), vec3<f32>(0.071, 0.620, 0.494), t * 2.0);
+            } else {
+                base = mix(vec3<f32>(0.071, 0.620, 0.494), vec3<f32>(0.957, 0.643, 0.173), (t - 0.5) * 2.0);
+            }
+        }
     } else {
-        base = mix(base, vec3<f32>(0.12, 0.68, 0.96), clamp(-anom / 2.2, 0.0, 1.0));
+        let anom = in.sst_speed.x;
+        if (anom >= 0.0) {
+            base = mix(base, vec3<f32>(0.96, 0.34, 0.16), clamp(anom / 2.8, 0.0, 1.0));
+        } else {
+            base = mix(base, vec3<f32>(0.12, 0.68, 0.96), clamp(-anom / 2.2, 0.0, 1.0));
+        }
     }
 
-    var color = base * (0.35 + 0.65 * ndotl) + vec3<f32>(spec + fresnel * 0.55);
+    var color = base * (0.35 + 0.65 * ndotl) + vec3<f32>(spec) + vec3<f32>(0.25, 0.66, 0.96) * fresnel;
 
     // Optional Spilhaus conformal square isolines & outer continental seam highlight
     if (u_scene.morph_overlay_layer_time.y > 0.5) {
@@ -155,3 +188,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(color, 1.0);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wgsl_mesh_masks_non_tropical_pacific_thermocline_and_shader_supports_layers() {
+        let (verts, _idx) = build_spilhaus_globe_mesh(32, 1.5);
+        assert!(verts.iter().any(|v| v.thermocline_m < 0.0));
+        assert!(verts.iter().any(|v| v.thermocline_m >= 16.0));
+        assert!(GLOBE_SHADER_WGSL.contains("thermocline_m"));
+        assert!(GLOBE_SHADER_WGSL.contains("data_layer"));
+        assert!(GLOBE_SHADER_WGSL.contains("sst_speed.y"));
+    }
+}

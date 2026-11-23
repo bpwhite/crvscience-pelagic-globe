@@ -21,11 +21,9 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use pelagic_globe::app::{render_headless_screenshot, PelagicGlobeApp};
-use pelagic_globe::coastlines::{WorldLandMask, CONTINENT_POLYLINES};
-use pelagic_globe::currents::{sample_velocity_ms, MAJOR_CURRENTS};
+use pelagic_globe::currents::MAJOR_CURRENTS;
 use pelagic_globe::enso::{
-    equatorial_20c_isotherm_depth_historical_m, export_oni_csv, spatial_sst_anomaly_historical,
-    EnsoPhase, ENSO_PRESETS, SEASONS,
+    equatorial_20c_isotherm_depth_historical_m, export_oni_csv, EnsoPhase, ENSO_PRESETS, SEASONS,
 };
 use pelagic_globe::globe_wgsl::build_spilhaus_globe_mesh;
 use pelagic_globe::icon::app_egui_icon;
@@ -36,7 +34,7 @@ use pelagic_globe::spilhaus::{
     lonlat_to_spilhaus_norm, sample_boundary_seam, spilhaus_norm_to_lonlat, SPILHAUS_LAT0_DEG,
     SPILHAUS_LON0_DEG,
 };
-use pelagic_globe::SimulationSnapshot;
+use pelagic_globe::{export_spilhaus_svg, SimulationSnapshot};
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
@@ -96,91 +94,6 @@ struct Cli {
     screenshot_view: u8,
 }
 
-fn export_svg(year: i32, season_index: usize, oni: f64) -> String {
-    let size = 720.0_f64;
-    let pad = 36.0_f64;
-    let inner = size - 2.0 * pad;
-    let mask = WorldLandMask::build();
-    let mut svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {size} {size}\" width=\"{size}\" height=\"{size}\">\n         <rect width=\"100%\" height=\"100%\" fill=\"#061325\"/>\n         <rect x=\"{pad}\" y=\"{pad}\" width=\"{inner}\" height=\"{inner}\" fill=\"#0a2240\" stroke=\"#facc15\" stroke-width=\"2\"/>\n"
-    );
-
-    let grid = 40;
-    for r in 0..grid {
-        let v = -0.96 + 1.92 * (r as f64 / (grid - 1) as f64);
-        for c in 0..grid {
-            let u = -0.96 + 1.92 * (c as f64 / (grid - 1) as f64);
-            let (lon, lat) = spilhaus_norm_to_lonlat(u, v);
-            if mask.is_land(lon, lat) {
-                continue;
-            }
-            let anom = spatial_sst_anomaly_historical(lon, lat, year, season_index, oni);
-            let (vx, vy) = sample_velocity_ms(lon, lat, oni);
-            let px = pad + (u + 1.0) * 0.5 * inner;
-            let py = pad + (1.0 - v) * 0.5 * inner;
-            let stroke = if anom >= 0.4 {
-                "#fb923c"
-            } else if anom <= -0.4 {
-                "#38bdf8"
-            } else {
-                "#34d399"
-            };
-            let dx = vx * 7.5;
-            let dy = -vy * 7.5;
-            svg.push_str(&format!(
-                "<line x1=\"{px:.1}\" y1=\"{py:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{stroke}\" stroke-width=\"1.4\" stroke-opacity=\"0.82\"/>\n",
-                px + dx,
-                py + dy
-            ));
-        }
-    }
-
-    let max_jump = inner * 0.25;
-    for poly in CONTINENT_POLYLINES {
-        let mut pts_str = String::new();
-        let mut pts_count = 0_usize;
-        let mut prev: Option<(f64, f64, f64)> = None;
-        for &(lat, lon) in *poly {
-            let (su, sv) = lonlat_to_spilhaus_norm(lon, lat);
-            let px = pad + (su + 1.0) * 0.5 * inner;
-            let py = pad + (1.0 - sv) * 0.5 * inner;
-            let should_break = match prev {
-                Some((plon, ppx, ppy)) => {
-                    (lon - plon).abs() > 180.0 || (px - ppx).hypot(py - ppy) > max_jump
-                }
-                None => false,
-            };
-            if should_break {
-                if pts_count >= 2 {
-                    svg.push_str(&format!(
-                        "<polyline points=\"{pts_str}\" fill=\"none\" stroke=\"#dbe4ee\" stroke-width=\"1.2\" stroke-opacity=\"0.9\"/>\n"
-                    ));
-                }
-                pts_str.clear();
-                pts_count = 0;
-            }
-            if pts_count > 0 {
-                pts_str.push(' ');
-            }
-            pts_str.push_str(&format!("{px:.1},{py:.1}"));
-            pts_count += 1;
-            prev = Some((lon, px, py));
-        }
-        if pts_count >= 2 {
-            svg.push_str(&format!(
-                "<polyline points=\"{pts_str}\" fill=\"none\" stroke=\"#dbe4ee\" stroke-width=\"1.2\" stroke-opacity=\"0.9\"/>\n"
-            ));
-        }
-    }
-
-    svg.push_str(&format!(
-        "<text x=\"{pad}\" y=\"24\" fill=\"#e2e8f0\" font-family=\"monospace\" font-size=\"14\">Spilhaus World Ocean Square (ESRI:54099) | {year} {} | ONI {oni:+.1} C ({})</text>\n</svg>\n",
-        SEASONS[season_index.min(11)],
-        EnsoPhase::from_oni(oni).label()
-    ));
-    svg
-}
-
 fn main() -> eframe::Result<()> {
     #[cfg(windows)]
     attach_parent_console_if_cli_args();
@@ -237,7 +150,7 @@ fn main() -> eframe::Result<()> {
     if let Some(path) = &cli.export_spilhaus_svg {
         fs::write(
             path,
-            export_svg(snapshot.year, snapshot.season_index, snapshot.oni_celsius),
+            export_spilhaus_svg(snapshot.year, snapshot.season_index, snapshot.oni_celsius),
         )
         .expect("Failed to write Spilhaus SVG");
         println!("Wrote conformal Spilhaus SVG layer to {}", path.display());

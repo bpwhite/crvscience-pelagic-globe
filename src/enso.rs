@@ -248,11 +248,11 @@ pub const ENSO_PRESETS: &[EnsoPreset] = &[
     },
     EnsoPreset {
         slug: "neutral-1990",
-        title: "1960 DJF (0.0°C) — Climatological Neutral Baseline",
-        year: 1960,
+        title: "1990 DJF (+0.2°C) — ENSO Neutral Baseline",
+        year: 1990,
         season_index: 0,
-        oni: 0.0,
-        summary: "Zero Niño 3.4 anomaly reference state: normal easterly trades, Western Pacific warm pool (~30°C), and sloped 20°C thermocline.",
+        oni: 0.2,
+        summary: "ENSO Neutral reference state (1990 DJF +0.2°C ONI): normal easterly trades, Western Pacific warm pool (~30°C), and sloped 20°C thermocline.",
     },
 ];
 
@@ -638,6 +638,28 @@ pub fn equatorial_20c_isotherm_depth_historical_m(lon360_deg: f64, year: i32, on
     (neutral_depth + shift).clamp(16.0, 225.0)
 }
 
+/// Evaluates the tropical Pacific `20°C` thermocline isotherm depth (`m`) inside the
+/// tropical Pacific basin (`|lat| <= 20°`, `120°E <= lon360 <= 280°E` / `80°W`).
+///
+/// Returns `None` outside the tropical Pacific (polar latitudes, Atlantic, Indian Ocean)
+/// so global maps and cursor telemetry do not extrapolate equatorial Pacific thermocline tilts
+/// onto extratropical or non-Pacific basins.
+pub fn tropical_pacific_20c_isotherm_depth_m(
+    lon_deg: f64,
+    lat_deg: f64,
+    year: i32,
+    oni: f64,
+) -> Option<f64> {
+    if lat_deg.abs() > 20.0 {
+        return None;
+    }
+    let lon360 = lon_deg.rem_euclid(360.0);
+    if !(120.0..=280.0).contains(&lon360) {
+        return None;
+    }
+    Some(equatorial_20c_isotherm_depth_historical_m(lon360, year, oni))
+}
+
 pub fn export_oni_csv() -> String {
     let mut out = String::from("year,season,oni_celsius,phase\n");
     for (yi, row) in ONI_TABLE_1950_2026.iter().enumerate() {
@@ -725,5 +747,21 @@ mod tests {
             nino34_1973 < -1.8,
             "Expected 1973 La Nina Nino3.4 ({nino34_1973:.2}) < -1.8"
         );
+    }
+
+    #[test]
+    fn masks_thermocline_depth_outside_tropical_pacific_and_validates_neutral_1990_preset() {
+        assert_eq!(tropical_pacific_20c_isotherm_depth_m(-140.0, 0.0, 1997, 2.4).is_some(), true);
+        assert_eq!(tropical_pacific_20c_isotherm_depth_m(-140.0, 65.0, 1997, 2.4), None);
+        assert_eq!(tropical_pacific_20c_isotherm_depth_m(-140.0, -70.0, 1997, 2.4), None);
+        assert_eq!(tropical_pacific_20c_isotherm_depth_m(-40.0, 0.0, 1997, 2.4), None);
+        assert_eq!(tropical_pacific_20c_isotherm_depth_m(75.0, 0.0, 1997, 2.4), None);
+
+        let neutral = ENSO_PRESETS
+            .iter()
+            .find(|p| p.slug == "neutral-1990")
+            .expect("neutral-1990 preset exists");
+        assert_eq!(neutral.year, 1990);
+        assert_eq!(lookup_oni(neutral.year, neutral.season_index), Some(neutral.oni));
     }
 }

@@ -24,21 +24,24 @@ use crate::currents::{sample_velocity_ms, MAJOR_CURRENTS};
 use crate::enso::{
     classify_historical_flavor, climatological_sst_c, equatorial_20c_isotherm_depth_historical_m,
     latest_valid_season_for_year, lookup_oni, lookup_oni_clamped, spatial_sst_anomaly_historical,
-    EnsoPhase, END_YEAR, ENSO_PRESETS, NINO_BOXES, SEASONS, START_YEAR,
+    tropical_pacific_20c_isotherm_depth_m, EnsoPhase, END_YEAR, ENSO_PRESETS, NINO_BOXES, SEASONS,
+    START_YEAR,
 };
 use crate::raster::{
     erddap_oisst_supported, fetch_live_noaa_erddap, FieldSource, SatelliteRasterGrid,
 };
 use crate::spilhaus::{
     lonlat_to_spilhaus_norm, sample_boundary_seam, spilhaus_norm_to_lonlat,
+    spilhaus_norm_to_lonlat_unclamped,
 };
 use crate::storage::BookmarkStore;
-use crate::{DataLayer, SimulationSnapshot, SpilhausInsetMode};
+use crate::{export_spilhaus_svg, DataLayer, SimulationSnapshot, SpilhausInsetMode};
 
 const SPILHAUS_GRID_N: usize = 96;
 const EQUIRECT_COLS: usize = 120;
 const EQUIRECT_ROWS: usize = 60;
 const INSET_GRID_N: usize = 48;
+const MOSAIC_GRID_N: usize = 72;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapViewMode {
@@ -75,7 +78,22 @@ struct ProjectedScreenVert {
     pos: Pos2,
     z3: f32,
     lit: f32,
+    spec: f32,
+    fresnel: f32,
     valid: bool,
+}
+
+#[derive(Clone, Copy)]
+struct HoverTelemetry {
+    lon_deg: f64,
+    lat_deg: f64,
+    sst_c: f64,
+    anom_c: f64,
+    u_ms: f64,
+    v_ms: f64,
+    thermo_m: Option<f64>,
+    is_land: bool,
+    is_ice: bool,
 }
 
 fn is_polar_ice_cell(lon_deg: f64, lat_deg: f64) -> bool {
@@ -107,6 +125,19 @@ fn build_spilhaus_grid(n: usize, land_mask: &WorldLandMask) -> Vec<MapGridVertex
         for c in 0..=n {
             let u = -0.996 + 1.992 * (c as f64 / n as f64);
             let (lon_deg, lat_deg) = spilhaus_norm_to_lonlat(u, v);
+            verts.push(make_grid_vertex(lon_deg, lat_deg, u as f32, v as f32, land_mask));
+        }
+    }
+    verts
+}
+
+fn build_spilhaus_mosaic_grid(n: usize, land_mask: &WorldLandMask) -> Vec<MapGridVertex> {
+    let mut verts = Vec::with_capacity((n + 1) * (n + 1));
+    for r in 0..=n {
+        let v = -2.994 + 5.988 * (r as f64 / n as f64);
+        for c in 0..=n {
+            let u = -2.994 + 5.988 * (c as f64 / n as f64);
+            let (lon_deg, lat_deg) = spilhaus_norm_to_lonlat_unclamped(u, v);
             verts.push(make_grid_vertex(lon_deg, lat_deg, u as f32, v as f32, land_mask));
         }
     }
@@ -210,6 +241,7 @@ pub struct PelagicGlobeApp {
     spilhaus_grid: Vec<MapGridVertex>,
     equirect_grid: Vec<MapGridVertex>,
     inset_grid: Vec<MapGridVertex>,
+    mosaic_grid: Vec<MapGridVertex>,
     coastline_rings: Vec<Vec<ProjectedCoastPt>>,
     seam_cache: Vec<(f64, f64)>,
     ocean_seeds: Vec<(f64, f64)>,
@@ -219,6 +251,8 @@ pub struct PelagicGlobeApp {
     erddap_in_flight: Option<String>,
     timeline_playing: bool,
     timeline_accum_sec: f32,
+    bookmark_name_draft: String,
+    export_prefix: String,
     status_note: String,
     pub show_about_window: bool,
 }
@@ -260,6 +294,7 @@ impl PelagicGlobeApp {
         let spilhaus_grid = build_spilhaus_grid(SPILHAUS_GRID_N, &land_mask);
         let equirect_grid = build_equirect_grid(EQUIRECT_COLS, EQUIRECT_ROWS, &land_mask);
         let inset_grid = build_spilhaus_grid(INSET_GRID_N, &land_mask);
+        let mosaic_grid = build_spilhaus_mosaic_grid(MOSAIC_GRID_N, &land_mask);
 
         let coastline_rings = CONTINENT_POLYLINES
             .iter()
@@ -323,6 +358,7 @@ impl PelagicGlobeApp {
             spilhaus_grid,
             equirect_grid,
             inset_grid,
+            mosaic_grid,
             coastline_rings,
             seam_cache,
             ocean_seeds,
@@ -332,6 +368,8 @@ impl PelagicGlobeApp {
             erddap_in_flight: None,
             timeline_playing: false,
             timeline_accum_sec: 0.0,
+            bookmark_name_draft: String::new(),
+            export_prefix: "pelagic_globe".to_string(),
             status_note,
             show_about_window: false,
         }
@@ -369,6 +407,40 @@ impl PelagicGlobeApp {
         });
     }
 
+    fn step_season(&mut self, delta: isize) {
+        self.timeline_playing = false;
+        let (ny, ns) = if delta < 0 {
+            if self.state.season_index > 0 {
+                (self.state.year, self.state.season_index - 1)
+            } else if self.state.year > START_YEAR {
+                (
+                    self.state.year - 1,
+                    latest_valid_season_for_year(self.state.year - 1),
+                )
+            } else {
+                (END_YEAR, latest_valid_season_for_year(END_YEAR))
+            }
+        } else {
+            let max_s = latest_valid_season_for_year(self.state.year);
+            if self.state.season_index < max_s {
+                (self.state.year, self.state.season_index + 1)
+            } else if self.state.year < END_YEAR {
+                (self.state.year + 1, 0)
+            } else {
+                (START_YEAR, 0)
+            }
+        };
+        self.apply_historical_date(ny, ns, false, None);
+    }
+
+    fn reset_camera(&mut self) {
+        self.pan_2d = Vec2::ZERO;
+        self.state.zoom = 1.0;
+        self.state.yaw_rad = 2.55;
+        self.state.pitch_rad = 0.14;
+        self.state.auto_rotate = false;
+    }
+
     fn trigger_erddap_fetch(&mut self) {
         if self.erddap_in_flight.is_some() {
             return;
@@ -389,30 +461,38 @@ impl PelagicGlobeApp {
         } else {
             format!("{year:04}-{month:02}-15")
         };
+        let stride = self.state.erddap_stride.clamp(2, 16);
+        let cache_key = format!("{iso}_s{stride}");
 
-        if let Some(cached) = self
-            .store
-            .as_ref()
-            .and_then(|s| s.get_cached_raster(&iso).ok().flatten())
-        {
+        if let Some(cached) = self.store.as_ref().and_then(|s| {
+            s.get_cached_raster(&cache_key)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    if stride == 8 {
+                        s.get_cached_raster(&iso).ok().flatten()
+                    } else {
+                        None
+                    }
+                })
+        }) {
             let cells = cached.valid_cell_count();
             let has_vel = cached.has_velocity;
             self.active_raster = Some(cached);
             self.state.field_source = FieldSource::SatelliteRaster;
             self.status_note = if has_vel {
-                format!("Loaded cached NOAA ERDDAP raster ({iso}, {cells} cells, OISST + NESDIS currents).")
+                format!("Loaded cached NOAA ERDDAP raster ({iso}, stride {stride}, {cells} cells, OISST + NESDIS currents).")
             } else {
-                format!("Loaded cached NOAA OISST v2.1 raster ({iso}, {cells} cells; analytical currents pre-2017).")
+                format!("Loaded cached NOAA OISST v2.1 raster ({iso}, stride {stride}, {cells} cells; analytical currents pre-2017).")
             };
             return;
         }
 
-        let stride = self.state.erddap_stride;
         let iso_thread = iso.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        self.erddap_in_flight = Some(iso.clone());
+        self.erddap_in_flight = Some(cache_key);
         self.erddap_rx = Some(rx);
-        self.status_note = format!("Fetching NOAA ERDDAP {iso} in background...");
+        self.status_note = format!("Fetching NOAA ERDDAP {iso} (stride {stride}) in background...");
         std::thread::spawn(move || {
             let res = fetch_live_noaa_erddap(&iso_thread, stride);
             let _ = tx.send((iso_thread, res));
@@ -432,6 +512,132 @@ impl PelagicGlobeApp {
         sample_velocity_ms(lon_deg, lat_deg, self.state.oni_celsius)
     }
 
+    fn sample_effective_sst_anom(&self, lon_deg: f64, lat_deg: f64) -> (f64, f64) {
+        if self.state.field_source == FieldSource::SatelliteRaster {
+            if let Some(grid) = &self.active_raster {
+                if let Some((sst, anom, _u, _v, _sla)) = grid.sample_bilinear(lon_deg, lat_deg) {
+                    return (sst, anom);
+                }
+            }
+        }
+        let anom = spatial_sst_anomaly_historical(
+            lon_deg,
+            lat_deg,
+            self.state.year,
+            self.state.season_index,
+            self.state.oni_celsius,
+        );
+        let base = climatological_sst_c(lon_deg, lat_deg, self.state.season_index);
+        ((base + anom).clamp(-2.0, 33.5), anom)
+    }
+
+    fn sample_ocean_telemetry(&self, lon_deg: f64, lat_deg: f64) -> HoverTelemetry {
+        let is_land = self.land_mask.is_land(lon_deg, lat_deg);
+        let is_ice = is_land && is_polar_ice_cell(lon_deg, lat_deg);
+        let (sst_c, anom_c) = self.sample_effective_sst_anom(lon_deg, lat_deg);
+        let (u_ms, v_ms) = self.sample_effective_velocity(lon_deg, lat_deg);
+        let thermo_m = if is_land {
+            None
+        } else {
+            tropical_pacific_20c_isotherm_depth_m(
+                lon_deg,
+                lat_deg,
+                self.state.year,
+                self.state.oni_celsius,
+            )
+        };
+        HoverTelemetry {
+            lon_deg,
+            lat_deg,
+            sst_c,
+            anom_c,
+            u_ms,
+            v_ms,
+            thermo_m,
+            is_land,
+            is_ice,
+        }
+    }
+
+    fn screen_pos_to_lonlat(&self, pos: Pos2, rect: Rect) -> Option<(f64, f64)> {
+        if !rect.contains(pos) {
+            return None;
+        }
+        if self.view_mode == MapViewMode::WorldMap2D {
+            let map_rect = self.world_map_rect(rect);
+            if !map_rect.contains(pos) {
+                return None;
+            }
+            let tx = f64::from((pos.x - map_rect.left()) / map_rect.width().max(1.0));
+            let ty = f64::from((pos.y - map_rect.top()) / map_rect.height().max(1.0));
+            let lon = (-180.0 + tx * 360.0).clamp(-180.0, 180.0);
+            let lat = (85.0 - ty * 170.0).clamp(-85.0, 85.0);
+            return Some((lon, lat));
+        }
+
+        let morph = self.effective_morph();
+        let center = rect.center();
+        let radius = rect.width().min(rect.height()) * 0.42 * self.state.zoom;
+        if radius < 1.0 {
+            return None;
+        }
+        let bx = (pos.x - center.x) / radius;
+        let by = (pos.y - center.y) / radius;
+
+        if morph >= 0.99 {
+            let su = f64::from(bx / 0.96);
+            let sv = f64::from(-by / 0.96);
+            if su.abs() <= 1.0 && sv.abs() <= 1.0 {
+                return Some(spilhaus_norm_to_lonlat(su, sv));
+            }
+            return None;
+        }
+
+        if morph < 0.04 {
+            let r2 = bx * bx + by * by;
+            if r2 > 1.0 {
+                return None;
+            }
+            let x3 = bx;
+            let y3 = -by;
+            let z3 = (1.0 - r2).max(0.0).sqrt();
+            let cos_p = self.state.pitch_rad.cos();
+            let sin_p = self.state.pitch_rad.sin();
+            let sin_lat = (y3 * cos_p + z3 * sin_p).clamp(-1.0, 1.0);
+            let cos_lat_cos_l = z3 * cos_p - y3 * sin_p;
+            let cos_lat_sin_l = x3;
+            let lat_deg = f64::from(sin_lat.asin().to_degrees());
+            let l_rad = f64::from(cos_lat_sin_l.atan2(cos_lat_cos_l));
+            let lon_deg = (l_rad - f64::from(self.state.yaw_rad)).to_degrees();
+            let lon_wrapped = (lon_deg + 180.0).rem_euclid(360.0) - 180.0;
+            return Some((lon_wrapped, lat_deg));
+        }
+
+        // Intermediate morph: find nearest visible projected surface grid vertex
+        let mut best: Option<(f32, f64, f64)> = None;
+        let max_d2 = (radius * 0.075).powi(2);
+        for v in &self.spilhaus_grid {
+            let pv = self.project_components_3d_spilhaus(
+                v.cos_lat,
+                v.sin_lat,
+                v.lon_rad,
+                v.su,
+                v.sv,
+                morph,
+                center,
+                radius,
+            );
+            if !pv.valid {
+                continue;
+            }
+            let d2 = pv.pos.distance_sq(pos);
+            if d2 <= max_d2 && best.map(|(bd2, _, _)| d2 < bd2).unwrap_or(true) {
+                best = Some((d2, v.lon_deg, v.lat_deg));
+            }
+        }
+        best.map(|(_, lon, lat)| (lon, lat))
+    }
+
     fn effective_morph(&self) -> f32 {
         match self.view_mode {
             MapViewMode::SpilhausSquare => 1.0,
@@ -441,37 +647,11 @@ impl PelagicGlobeApp {
     }
 
     fn ocean_color(&self, lon_deg: f64, lat_deg: f64) -> [f32; 3] {
-        let mut sst_override = None;
-        let mut anom_override = None;
-        let mut vel_override = None;
-        if self.state.field_source == FieldSource::SatelliteRaster {
-            if let Some(grid) = &self.active_raster {
-                if let Some((sst, anom, u, v, _sla)) = grid.sample_bilinear(lon_deg, lat_deg) {
-                    sst_override = Some(sst);
-                    anom_override = Some(anom);
-                    if grid.has_velocity {
-                        vel_override = Some((u, v));
-                    }
-                }
-            }
-        }
-
+        let (sst_val, anom_val) = self.sample_effective_sst_anom(lon_deg, lat_deg);
         match self.state.data_layer {
-            DataLayer::EnsoSstAnomaly => {
-                let anom = anom_override.unwrap_or_else(|| {
-                    spatial_sst_anomaly_historical(
-                        lon_deg,
-                        lat_deg,
-                        self.state.year,
-                        self.state.season_index,
-                        self.state.oni_celsius,
-                    )
-                }) as f32;
-                diverged_anom_rgb(anom)
-            }
+            DataLayer::EnsoSstAnomaly => diverged_anom_rgb(anom_val as f32),
             DataLayer::CurrentVelocity => {
-                let (vx, vy) = vel_override
-                    .unwrap_or_else(|| sample_velocity_ms(lon_deg, lat_deg, self.state.oni_celsius));
+                let (vx, vy) = self.sample_effective_velocity(lon_deg, lat_deg);
                 let t = ((vx * vx + vy * vy).sqrt() as f32 / 1.4).clamp(0.0, 1.0);
                 if t < 0.5 {
                     lerp_rgb([8.0, 24.0, 54.0], [24.0, 154.0, 188.0], t * 2.0)
@@ -480,18 +660,7 @@ impl PelagicGlobeApp {
                 }
             }
             DataLayer::AbsoluteSst => {
-                let sst = sst_override.unwrap_or_else(|| {
-                    let base = climatological_sst_c(lon_deg, lat_deg, self.state.season_index);
-                    let anom = spatial_sst_anomaly_historical(
-                        lon_deg,
-                        lat_deg,
-                        self.state.year,
-                        self.state.season_index,
-                        self.state.oni_celsius,
-                    );
-                    (base + anom).clamp(-2.0, 33.5)
-                }) as f32;
-                let t = ((sst + 2.0) / 34.0).clamp(0.0, 1.0);
+                let t = ((sst_val as f32 + 2.0) / 34.0).clamp(0.0, 1.0);
                 if t < 0.5 {
                     lerp_rgb([16.0, 32.0, 98.0], [20.0, 148.0, 162.0], t * 2.0)
                 } else {
@@ -499,17 +668,22 @@ impl PelagicGlobeApp {
                 }
             }
             DataLayer::ThermoclineDepth => {
-                let lon360 = lon_deg.rem_euclid(360.0);
-                let depth = equatorial_20c_isotherm_depth_historical_m(
-                    lon360,
+                match tropical_pacific_20c_isotherm_depth_m(
+                    lon_deg,
+                    lat_deg,
                     self.state.year,
                     self.state.oni_celsius,
-                ) as f32;
-                let t = ((depth - 20.0) / 170.0).clamp(0.0, 1.0);
-                if t < 0.5 {
-                    lerp_rgb([28.0, 34.0, 108.0], [18.0, 158.0, 126.0], t * 2.0)
-                } else {
-                    lerp_rgb([18.0, 158.0, 126.0], [244.0, 164.0, 44.0], (t - 0.5) * 2.0)
+                ) {
+                    Some(depth_f64) => {
+                        let depth = depth_f64 as f32;
+                        let t = ((depth - 20.0) / 170.0).clamp(0.0, 1.0);
+                        if t < 0.5 {
+                            lerp_rgb([28.0, 34.0, 108.0], [18.0, 158.0, 126.0], t * 2.0)
+                        } else {
+                            lerp_rgb([18.0, 158.0, 126.0], [244.0, 164.0, 44.0], (t - 0.5) * 2.0)
+                        }
+                    }
+                    None => [14.0, 26.0, 44.0],
                 }
             }
         }
@@ -556,13 +730,27 @@ impl PelagicGlobeApp {
         let bx = x3 * (1.0 - morph) + sx * morph;
         let by = -y3 * (1.0 - morph) + sy * morph;
 
-        let raw_ndotl = (x3 * 0.48 + y3 * 0.48 + z3 * 0.74).clamp(0.0, 1.0);
-        let lit = (0.34 + 0.66 * raw_ndotl) * (1.0 - morph) + morph;
+        // Solar directional diffuse + Blinn-Phong specular glint + Rayleigh Fresnel limb glow
+        let lx = 0.54_f32;
+        let ly = 0.46_f32;
+        let lz = 0.704_f32;
+        let raw_ndotl = (x3 * lx + y3 * ly + z3 * lz).clamp(0.0, 1.0);
+        let lit = (0.30 + 0.70 * raw_ndotl) * (1.0 - morph) + morph;
+
+        // Half-vector of normalized light + view (0, 0, 1)
+        let hx = 0.292_f32;
+        let hy = 0.249_f32;
+        let hz = 0.923_f32;
+        let ndoth = (x3 * hx + y3 * hy + z3 * hz).max(0.0);
+        let spec = ndoth.powi(36) * 0.34 * (1.0 - morph);
+        let fresnel = (1.0 - z3.max(0.0)).powf(3.2) * 0.32 * (1.0 - morph);
 
         ProjectedScreenVert {
             pos: Pos2::new(center.x + bx * radius, center.y + by * radius),
             z3,
             lit,
+            spec,
+            fresnel,
             valid,
         }
     }
@@ -614,10 +802,12 @@ impl PelagicGlobeApp {
         for i in 0..self.drifters.len() {
             let p = self.drifters[i];
             let (u1, v1) = self.sample_effective_velocity(p.0, p.1);
-            let mid_lon = p.0 + 0.5 * scale * u1;
+            let inv_cos1 = 1.0 / p.1.to_radians().cos().max(0.15);
+            let mid_lon = p.0 + 0.5 * scale * u1 * inv_cos1;
             let mid_lat = (p.1 + 0.5 * scale * v1).clamp(-82.0, 82.0);
             let (u2, v2) = self.sample_effective_velocity(mid_lon, mid_lat);
-            let next_lon = (p.0 + scale * u2 + 180.0).rem_euclid(360.0) - 180.0;
+            let inv_cos2 = 1.0 / mid_lat.to_radians().cos().max(0.15);
+            let next_lon = (p.0 + scale * u2 * inv_cos2 + 180.0).rem_euclid(360.0) - 180.0;
             let next_lat = (p.1 + scale * v2).clamp(-82.0, 82.0);
             if self.land_mask.is_land(next_lon, next_lat) || ((i + tick) % 311) == 0 {
                 let idx = (i * 37 + tick * 13) % seed_len;
@@ -649,12 +839,24 @@ impl PelagicGlobeApp {
                 center,
                 radius,
             );
-            let base_rgb = if v.is_land && self.show_world_map {
+            let is_land_vis = v.is_land && self.show_world_map;
+            let base_rgb = if is_land_vis {
                 land_color(v.lon_deg, v.lat_deg, v.is_ice)
             } else {
                 self.ocean_color(v.lon_deg, v.lat_deg)
             };
-            colors.push(to_color32(base_rgb, pv.lit));
+            let glint = if is_land_vis { 0.0 } else { pv.spec * 96.0 };
+            let limb = if is_land_vis {
+                pv.fresnel * 0.35
+            } else {
+                pv.fresnel
+            };
+            let shaded = [
+                base_rgb[0] * pv.lit + glint + 64.0 * limb,
+                base_rgb[1] * pv.lit + glint + 168.0 * limb,
+                base_rgb[2] * pv.lit + glint * 1.05 + 245.0 * limb,
+            ];
+            colors.push(to_color32(shaded, 1.0));
             projected.push(pv);
         }
 
@@ -851,15 +1053,56 @@ impl PelagicGlobeApp {
         };
         let track_stroke = Stroke::new(2.4_f32, Color32::from_rgb(250, 204, 21));
         for pair in cur.waypoints.windows(2) {
-            if (pair[0].0 - pair[1].0).abs() > 180.0 {
-                continue;
+            let (lon0, lat0) = pair[0];
+            let (lon1, lat1) = pair[1];
+            let mut lon1_u = lon1;
+            if (lon1_u - lon0).abs() > 180.0 {
+                if lon1_u < lon0 {
+                    lon1_u += 360.0;
+                } else {
+                    lon1_u -= 360.0;
+                }
             }
-            if let (Some((a, _)), Some((b, _))) = (
-                self.project_lonlat(pair[0].0, pair[0].1, rect),
-                self.project_lonlat(pair[1].0, pair[1].1, rect),
-            ) {
-                if a.distance(b) <= jump_limit {
-                    painter.line_segment([a, b], track_stroke);
+            let sub_steps = 8_usize;
+            for s in 0..sub_steps {
+                let t0 = s as f64 / sub_steps as f64;
+                let t1 = (s + 1) as f64 / sub_steps as f64;
+                let a_lon = lon0 + (lon1_u - lon0) * t0;
+                let a_lat = lat0 + (lat1 - lat0) * t0;
+                let b_lon = lon0 + (lon1_u - lon0) * t1;
+                let b_lat = lat0 + (lat1 - lat0) * t1;
+                let wa = wrap_lon_180_preserving_endpoints(a_lon);
+                let wb = wrap_lon_180_preserving_endpoints(b_lon);
+
+                if (wb - wa).abs() > 180.0 {
+                    let seam_u = if b_lon > a_lon { 180.0 } else { -180.0 };
+                    let frac = ((seam_u - a_lon) / (b_lon - a_lon)).clamp(0.0, 1.0);
+                    let seam_lat = a_lat + (b_lat - a_lat) * frac;
+                    let seam_a = if b_lon > a_lon { 180.0 } else { -180.0 };
+                    let seam_b = -seam_a;
+                    if let (Some((pa, _)), Some((ps, _))) = (
+                        self.project_lonlat(wa, a_lat, rect),
+                        self.project_lonlat(seam_a, seam_lat, rect),
+                    ) {
+                        if pa.distance(ps) <= jump_limit {
+                            painter.line_segment([pa, ps], track_stroke);
+                        }
+                    }
+                    if let (Some((ps, _)), Some((pb, _))) = (
+                        self.project_lonlat(seam_b, seam_lat, rect),
+                        self.project_lonlat(wb, b_lat, rect),
+                    ) {
+                        if ps.distance(pb) <= jump_limit {
+                            painter.line_segment([ps, pb], track_stroke);
+                        }
+                    }
+                } else if let (Some((pa, _)), Some((pb, _))) = (
+                    self.project_lonlat(wa, a_lat, rect),
+                    self.project_lonlat(wb, b_lat, rect),
+                ) {
+                    if pa.distance(pb) <= jump_limit {
+                        painter.line_segment([pa, pb], track_stroke);
+                    }
                 }
             }
         }
@@ -976,10 +1219,12 @@ impl PelagicGlobeApp {
     }
 
     fn render_docked_spilhaus_inset(&self, painter: &egui::Painter, rect: Rect) {
-        if self.state.spilhaus_inset_mode == SpilhausInsetMode::Hidden {
-            return;
-        }
-        let side = 184.0_f32;
+        let is_mosaic = match self.state.spilhaus_inset_mode {
+            SpilhausInsetMode::Hidden => return,
+            SpilhausInsetMode::DockedSquare => false,
+            SpilhausInsetMode::Mosaic3x3 => true,
+        };
+        let side = if is_mosaic { 222.0_f32 } else { 184.0_f32 };
         if rect.width() < side + 40.0 || rect.height() < side + 40.0 {
             return;
         }
@@ -995,12 +1240,16 @@ impl PelagicGlobeApp {
 
         let pad = 6.0_f32;
         let inner = inset.shrink(pad);
-        let n = INSET_GRID_N;
+        let (grid, n, coord_scale): (&[MapGridVertex], usize, f32) = if is_mosaic {
+            (&self.mosaic_grid, MOSAIC_GRID_N, 3.0)
+        } else {
+            (&self.inset_grid, INSET_GRID_N, 1.0)
+        };
         let stride = n + 1;
         let mut mesh = egui::epaint::Mesh::default();
-        for v in &self.inset_grid {
-            let px = inner.center().x + v.su * (inner.width() * 0.5);
-            let py = inner.center().y - v.sv * (inner.height() * 0.5);
+        for v in grid {
+            let px = inner.center().x + (v.su / coord_scale) * (inner.width() * 0.5);
+            let py = inner.center().y - (v.sv / coord_scale) * (inner.height() * 0.5);
             let rgb = if v.is_land && self.show_world_map {
                 land_color(v.lon_deg, v.lat_deg, v.is_ice)
             } else {
@@ -1021,17 +1270,21 @@ impl PelagicGlobeApp {
         painter.add(egui::Shape::mesh(mesh));
 
         if self.show_world_map {
-            let inset_shore = Stroke::new(0.8_f32, Color32::from_rgba_unmultiplied(226, 232, 240, 215));
-            let inset_jump = inner.width() * 0.25;
+            let inset_shore = Stroke::new(
+                if is_mosaic { 0.65_f32 } else { 0.8_f32 },
+                Color32::from_rgba_unmultiplied(226, 232, 240, 215),
+            );
+            let tile_w = inner.width() / coord_scale;
+            let inset_jump = tile_w * 0.25;
             for ring in &self.coastline_rings {
                 for seg in ring.windows(2) {
                     if (seg[0].lon_deg - seg[1].lon_deg).abs() > 180.0 {
                         continue;
                     }
-                    let ax = inner.center().x + seg[0].su * (inner.width() * 0.5);
-                    let ay = inner.center().y - seg[0].sv * (inner.height() * 0.5);
-                    let bx = inner.center().x + seg[1].su * (inner.width() * 0.5);
-                    let by = inner.center().y - seg[1].sv * (inner.height() * 0.5);
+                    let ax = inner.center().x + (seg[0].su / coord_scale) * (inner.width() * 0.5);
+                    let ay = inner.center().y - (seg[0].sv / coord_scale) * (inner.height() * 0.5);
+                    let bx = inner.center().x + (seg[1].su / coord_scale) * (inner.width() * 0.5);
+                    let by = inner.center().y - (seg[1].sv / coord_scale) * (inner.height() * 0.5);
                     let a = Pos2::new(ax, ay);
                     let b = Pos2::new(bx, by);
                     if a.distance(b) <= inset_jump {
@@ -1044,22 +1297,52 @@ impl PelagicGlobeApp {
         if self.state.show_currents {
             for &(lon, lat) in self.drifters.iter().step_by(4) {
                 let (u, v) = lonlat_to_spilhaus_norm(lon, lat);
-                let px = inner.center().x + (u as f32) * (inner.width() * 0.5);
-                let py = inner.center().y - (v as f32) * (inner.height() * 0.5);
+                let px = inner.center().x + (u as f32 / coord_scale) * (inner.width() * 0.5);
+                let py = inner.center().y - (v as f32 / coord_scale) * (inner.height() * 0.5);
                 painter.circle_filled(
                     Pos2::new(px, py),
-                    1.0,
+                    if is_mosaic { 0.85 } else { 1.0 },
                     Color32::from_rgba_unmultiplied(125, 211, 252, 210),
                 );
             }
         }
 
-        painter.rect_stroke(
-            inner,
-            CornerRadius::ZERO,
-            Stroke::new(1.1_f32, Color32::from_rgb(250, 204, 21)),
-            egui::StrokeKind::Inside,
-        );
+        if is_mosaic {
+            let tile_stroke = Stroke::new(0.7_f32, Color32::from_rgba_unmultiplied(148, 210, 240, 95));
+            for k in 1..3 {
+                let f = k as f32 / 3.0;
+                let gx = inner.left() + f * inner.width();
+                let gy = inner.top() + f * inner.height();
+                painter.line_segment(
+                    [Pos2::new(gx, inner.top()), Pos2::new(gx, inner.bottom())],
+                    tile_stroke,
+                );
+                painter.line_segment(
+                    [Pos2::new(inner.left(), gy), Pos2::new(inner.right(), gy)],
+                    tile_stroke,
+                );
+            }
+            let primary_rect = Rect::from_center_size(inner.center(), inner.size() / 3.0);
+            painter.rect_stroke(
+                primary_rect,
+                CornerRadius::ZERO,
+                Stroke::new(1.1_f32, Color32::from_rgb(250, 204, 21)),
+                egui::StrokeKind::Inside,
+            );
+            painter.rect_stroke(
+                inner,
+                CornerRadius::ZERO,
+                Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(56, 189, 248, 175)),
+                egui::StrokeKind::Inside,
+            );
+        } else {
+            painter.rect_stroke(
+                inner,
+                CornerRadius::ZERO,
+                Stroke::new(1.1_f32, Color32::from_rgb(250, 204, 21)),
+                egui::StrokeKind::Inside,
+            );
+        }
         painter.rect_stroke(
             inset,
             CornerRadius::same(6),
@@ -1069,7 +1352,11 @@ impl PelagicGlobeApp {
         painter.text(
             Pos2::new(inset.center().x, inset.top() + 9.0),
             egui::Align2::CENTER_CENTER,
-            "Spilhaus Square (ESRI:54099)",
+            if is_mosaic {
+                "Spilhaus 3x3 Mosaic (ESRI:54099)"
+            } else {
+                "Spilhaus Square (ESRI:54099)"
+            },
             egui::FontId::proportional(9.5),
             Color32::from_rgb(226, 232, 240),
         );
@@ -1223,22 +1510,25 @@ impl PelagicGlobeApp {
     pub fn ui_step(&mut self, ctx: &egui::Context, interactive: bool) {
         if interactive {
             if let Some(rx) = &self.erddap_rx {
-                if let Ok((iso, res)) = rx.try_recv() {
+                if let Ok((cache_key, res)) = rx.try_recv() {
                     self.erddap_rx = None;
-                    self.erddap_in_flight = None;
+                    let key_to_store = self
+                        .erddap_in_flight
+                        .take()
+                        .unwrap_or_else(|| cache_key.clone());
                     match res {
                         Ok(grid) => {
                             let cells = grid.valid_cell_count();
                             let has_vel = grid.has_velocity;
                             if let Some(store) = &self.store {
-                                let _ = store.put_cached_raster(&iso, &grid);
+                                let _ = store.put_cached_raster(&key_to_store, &grid);
                             }
                             self.active_raster = Some(grid);
                             self.state.field_source = FieldSource::SatelliteRaster;
                             self.status_note = if has_vel {
-                                format!("Loaded NOAA ERDDAP raster ({iso}, {cells} cells, OISST + NESDIS currents).")
+                                format!("Loaded NOAA ERDDAP raster ({cache_key}, {cells} cells, OISST + NESDIS currents).")
                             } else {
-                                format!("Loaded NOAA OISST v2.1 raster ({iso}, {cells} cells; analytical currents pre-2017).")
+                                format!("Loaded NOAA OISST v2.1 raster ({cache_key}, {cells} cells; analytical currents pre-2017).")
                             };
                         }
                         Err(err) => {
@@ -1248,6 +1538,11 @@ impl PelagicGlobeApp {
                 }
             }
 
+            let wants_kb = ctx.wants_keyboard_input();
+            let mut key_play_pause = false;
+            let mut key_step: isize = 0;
+            let mut key_view: Option<MapViewMode> = None;
+            let mut key_reset = false;
             ctx.input(|i| {
                 if i.key_pressed(egui::Key::F1) {
                     self.show_about_window = !self.show_about_window;
@@ -1255,7 +1550,45 @@ impl PelagicGlobeApp {
                 if i.key_pressed(egui::Key::Escape) && self.show_about_window {
                     self.show_about_window = false;
                 }
+                if !wants_kb {
+                    if i.key_pressed(egui::Key::Space) {
+                        key_play_pause = true;
+                    }
+                    if i.key_pressed(egui::Key::ArrowLeft) {
+                        key_step = -1;
+                    } else if i.key_pressed(egui::Key::ArrowRight) {
+                        key_step = 1;
+                    }
+                    if i.key_pressed(egui::Key::Num1) {
+                        key_view = Some(MapViewMode::Globe3D);
+                    } else if i.key_pressed(egui::Key::Num2) {
+                        key_view = Some(MapViewMode::WorldMap2D);
+                    } else if i.key_pressed(egui::Key::Num3) {
+                        key_view = Some(MapViewMode::SpilhausSquare);
+                    }
+                    if i.key_pressed(egui::Key::R) {
+                        key_reset = true;
+                    }
+                }
             });
+            if key_play_pause {
+                self.timeline_playing = !self.timeline_playing;
+                self.timeline_accum_sec = 0.0;
+            }
+            if key_step != 0 {
+                self.step_season(key_step);
+            }
+            if let Some(vm) = key_view {
+                self.view_mode = vm;
+                match vm {
+                    MapViewMode::Globe3D => self.state.spilhaus_morph = 0.0,
+                    MapViewMode::WorldMap2D => self.pan_2d = Vec2::ZERO,
+                    MapViewMode::SpilhausSquare => self.state.spilhaus_morph = 1.0,
+                }
+            }
+            if key_reset {
+                self.reset_camera();
+            }
 
             let dt = ctx.input(|i| i.stable_dt).min(0.05);
             if self.timeline_playing {
@@ -1302,52 +1635,72 @@ impl PelagicGlobeApp {
                 ui.separator();
 
                 if ui
-                    .selectable_label(self.view_mode == MapViewMode::Globe3D && self.state.spilhaus_morph < 0.99, "3D Globe")
+                    .selectable_label(self.view_mode == MapViewMode::Globe3D && self.state.spilhaus_morph < 0.99, "3D Globe [1]")
+                    .on_hover_text("Interactive rotating 3D ocean sphere (Hotkey: 1)")
                     .clicked()
                 {
                     self.view_mode = MapViewMode::Globe3D;
                     self.state.spilhaus_morph = 0.0;
                 }
                 if ui
-                    .selectable_label(self.view_mode == MapViewMode::WorldMap2D, "World Map (2D)")
+                    .selectable_label(self.view_mode == MapViewMode::WorldMap2D, "World Map (2D) [2]")
+                    .on_hover_text("Equirectangular 2D global map (Hotkey: 2)")
                     .clicked()
                 {
                     self.view_mode = MapViewMode::WorldMap2D;
                     self.pan_2d = Vec2::ZERO;
                 }
                 if ui
-                    .selectable_label(self.view_mode == MapViewMode::SpilhausSquare, "Spilhaus Square")
+                    .selectable_label(self.view_mode == MapViewMode::SpilhausSquare, "Spilhaus Square [3]")
+                    .on_hover_text("Conformal Spilhaus World Ocean Square ESRI:54099 (Hotkey: 3)")
                     .clicked()
                 {
                     self.view_mode = MapViewMode::SpilhausSquare;
                     self.state.spilhaus_morph = 1.0;
                 }
+                if ui
+                    .button("Reset View [R]")
+                    .on_hover_text("Reset yaw, pitch, 2D pan, and zoom (Hotkey: R)")
+                    .clicked()
+                {
+                    self.reset_camera();
+                }
 
                 ui.separator();
-                if ui.button("Save SQLite Bookmark").clicked() {
+                if ui
+                    .button("Save SQLite Bookmark")
+                    .on_hover_text("Persist current camera, episode, and layer snapshot into WAL SQLite")
+                    .clicked()
+                {
                     if let Some(store) = &self.store {
-                        let label = format!(
-                            "{} {} ({:+.1}C)",
-                            self.state.year,
-                            SEASONS[self.state.season_index.min(11)],
-                            self.state.oni_celsius
-                        );
+                        let custom = self.bookmark_name_draft.trim();
+                        let label = if custom.is_empty() {
+                            format!(
+                                "{} {} ({:+.1}C)",
+                                self.state.year,
+                                SEASONS[self.state.season_index.min(11)],
+                                self.state.oni_celsius
+                            )
+                        } else {
+                            custom.to_string()
+                        };
                         if store.save_bookmark(&label, &self.state).is_ok() {
                             self.saved_bookmarks = store.list_bookmarks().unwrap_or_default();
+                            self.bookmark_name_draft.clear();
                             self.status_note =
                                 format!("Saved bookmark '{label}' to WAL SQLite store.");
                         }
                     }
                 }
                 ui.separator();
-                if ui.button("About").clicked() {
+                if ui.button("About [F1]").clicked() {
                     self.show_about_window = !self.show_about_window;
                 }
             });
         });
 
         egui::SidePanel::left("controls_panel")
-            .default_width(308.0)
+            .default_width(316.0)
             .show(ctx, |ui| {
                 egui::Frame::NONE
                     .fill(Color32::from_rgb(12, 22, 36))
@@ -1361,6 +1714,7 @@ impl PelagicGlobeApp {
                                     egui::Slider::new(&mut self.state.spilhaus_morph, 0.0..=1.0)
                                         .text("3D <-> Spilhaus Morph"),
                                 )
+                                .on_hover_text("Continuously morph between the 3D sphere (0.0) and conformal Spilhaus World Ocean Square (1.0)")
                                 .changed()
                             {
                                 self.view_mode = if self.state.spilhaus_morph >= 0.99 {
@@ -1369,22 +1723,52 @@ impl PelagicGlobeApp {
                                     MapViewMode::Globe3D
                                 };
                             }
-                            ui.checkbox(&mut self.show_world_map, "World Map & Coastlines");
-                            ui.checkbox(&mut self.show_graticule, "Lat/Lon Graticule");
+                            ui.checkbox(&mut self.show_world_map, "World Map & Coastlines")
+                                .on_hover_text("Toggle Natural-Earth continental coastlines, ice shelves, and ocean basin labels");
+                            ui.checkbox(&mut self.show_graticule, "Lat/Lon Graticule")
+                                .on_hover_text("Show 30-degree latitude/longitude graticule and highlighted Equator");
                             ui.checkbox(
                                 &mut self.state.show_spilhaus_overlay,
                                 "Spilhaus Seam & Conformal Grid",
-                            );
-                            ui.checkbox(&mut self.state.auto_rotate, "Auto-Rotate 3D Globe");
-                            ui.checkbox(&mut self.state.show_currents, "Lagrangian Current Ribbons");
+                            )
+                            .on_hover_text("Highlight the East Asia - Bering Strait - South America Spilhaus boundary cut seam");
+                            ui.checkbox(&mut self.state.auto_rotate, "Auto-Rotate 3D Globe")
+                                .on_hover_text("Slowly spin the 3D globe in azimuth (disabled automatically when dragging)");
+                            ui.checkbox(&mut self.state.show_currents, "Lagrangian Current Ribbons")
+                                .on_hover_text("Animate 4,200 RK2 spherical surface drifters across global ocean currents");
                             ui.checkbox(
                                 &mut self.state.show_nino_boxes,
                                 "NOAA Niño 1+2 / 3 / 3.4 / 4 Boxes",
-                            );
+                            )
+                            .on_hover_text("Overlay official NOAA equatorial Pacific monitoring regions");
                             ui.add(
                                 egui::Slider::new(&mut self.state.flow_speed, 0.25..=2.5)
                                     .text("Advection Speed"),
-                            );
+                            )
+                            .on_hover_text("Multiplier for Lagrangian surface drifter RK2 integration step");
+
+                            ui.add_space(4.0);
+                            ui.label(RichText::new("Spilhaus Inset Overlay").strong());
+                            ui.horizontal_wrapped(|ui| {
+                                ui.selectable_value(
+                                    &mut self.state.spilhaus_inset_mode,
+                                    SpilhausInsetMode::DockedSquare,
+                                    "Docked Square",
+                                )
+                                .on_hover_text("Render a single synchronized ESRI:54099 Spilhaus inset in the bottom-right corner");
+                                ui.selectable_value(
+                                    &mut self.state.spilhaus_inset_mode,
+                                    SpilhausInsetMode::Mosaic3x3,
+                                    "3x3 Mosaic",
+                                )
+                                .on_hover_text("Render a periodic 3x3 conformal Adams/Spilhaus world-ocean mosaic inset");
+                                ui.selectable_value(
+                                    &mut self.state.spilhaus_inset_mode,
+                                    SpilhausInsetMode::Hidden,
+                                    "Hidden",
+                                )
+                                .on_hover_text("Hide the bottom-right Spilhaus inset panel");
+                            });
 
                             ui.separator();
                             ui.heading("Field Source (Model vs. Satellite Raster)");
@@ -1392,12 +1776,14 @@ impl PelagicGlobeApp {
                                 &mut self.state.field_source,
                                 FieldSource::AnalyticalModel,
                                 FieldSource::AnalyticalModel.label(),
-                            );
+                            )
+                            .on_hover_text("Use zero-latency 1950-2026 NOAA CPC ERSSTv6 coupled ENSO + gyre model");
                             if ui
                                 .selectable_label(
                                     self.state.field_source == FieldSource::SatelliteRaster,
                                     FieldSource::SatelliteRaster.label(),
                                 )
+                                .on_hover_text("Display fetched NOAA CoastWatch ERDDAP OISST v2.1 + NESDIS geostrophic raster")
                                 .clicked()
                             {
                                 self.state.field_source = FieldSource::SatelliteRaster;
@@ -1405,6 +1791,27 @@ impl PelagicGlobeApp {
                                     self.status_note = "No satellite raster loaded yet — click 'Fetch NOAA Satellite Raster' below.".to_string();
                                 }
                             }
+                            ui.horizontal(|ui| {
+                                ui.label("ERDDAP Stride:")
+                                    .on_hover_text("Subsampling stride on 0.25 deg NOAA grids (2 = 0.5 deg, 4 = 1.0 deg, 8 = 2.0 deg)");
+                                egui::ComboBox::from_id_salt("erddap_stride_combo")
+                                    .selected_text(format!(
+                                        "{} ({:.2}°)",
+                                        self.state.erddap_stride,
+                                        self.state.erddap_stride as f32 * 0.25
+                                    ))
+                                    .show_ui(ui, |ui| {
+                                        for (s, desc) in [
+                                            (2_usize, "2 (0.50° — High Detail)"),
+                                            (4, "4 (1.00° — Standard)"),
+                                            (8, "8 (2.00° — Fast)"),
+                                            (12, "12 (3.00° — Coarse)"),
+                                            (16, "16 (4.00° — Minimal)"),
+                                        ] {
+                                            ui.selectable_value(&mut self.state.erddap_stride, s, desc);
+                                        }
+                                    });
+                            });
                             let fetch_month = (self.state.season_index + 1).clamp(1, 12);
                             let fetch_label = match &self.erddap_in_flight {
                                 Some(iso) => format!("Fetching NOAA ERDDAP ({iso})..."),
@@ -1418,6 +1825,7 @@ impl PelagicGlobeApp {
                                     self.erddap_in_flight.is_none(),
                                     egui::Button::new(fetch_label),
                                 )
+                                .on_hover_text("Query live NOAA OISST v2.1 (Sep 1981+) and NESDIS currents (2017+) over HTTPS with SQLite caching")
                                 .clicked()
                             {
                                 self.trigger_erddap_fetch();
@@ -1431,11 +1839,18 @@ impl PelagicGlobeApp {
                                 DataLayer::AbsoluteSst,
                                 DataLayer::ThermoclineDepth,
                             ] {
+                                let tip = match layer {
+                                    DataLayer::EnsoSstAnomaly => "Diverging sea-surface temperature anomaly relative to climatology",
+                                    DataLayer::CurrentVelocity => "Mixed-layer surface current speed magnitude (m/s), excluding subsurface EUC",
+                                    DataLayer::AbsoluteSst => "Seasonal climatology + historical ENSO/marine-heatwave SST (deg C)",
+                                    DataLayer::ThermoclineDepth => "20 deg C isotherm depth across tropical Pacific (|lat| <= 20 deg, 120E-80W); masked elsewhere",
+                                };
                                 ui.selectable_value(
                                     &mut self.state.data_layer,
                                     layer,
                                     layer.label(),
-                                );
+                                )
+                                .on_hover_text(tip);
                             }
 
                             ui.separator();
@@ -1455,7 +1870,11 @@ impl PelagicGlobeApp {
                                 };
                                 ui.horizontal(|ui| {
                                     ui.colored_label(badge_col, format!("{:+.1}", preset.oni));
-                                    if ui.selectable_label(is_active, preset.title).clicked() {
+                                    if ui
+                                        .selectable_label(is_active, preset.title)
+                                        .on_hover_text(preset.summary)
+                                        .clicked()
+                                    {
                                         self.timeline_playing = false;
                                         self.apply_historical_date(
                                             preset.year,
@@ -1471,16 +1890,73 @@ impl PelagicGlobeApp {
                             ui.collapsing(
                                 format!("Saved SQLite Bookmarks ({})", self.saved_bookmarks.len()),
                                 |ui| {
-                                    if self.saved_bookmarks.is_empty() {
-                                        ui.small("No saved bookmarks yet — click Save SQLite Bookmark above.");
-                                    } else {
-                                        let mut restored: Option<(String, SimulationSnapshot)> = None;
-                                        for (id, name, snap) in &self.saved_bookmarks {
-                                            if ui.button(format!("#{id} {name}")).clicked() {
-                                                restored = Some((name.clone(), snap.clone()));
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut self.bookmark_name_draft)
+                                                .desired_width(170.0)
+                                                .hint_text("Optional bookmark label"),
+                                        )
+                                        .on_hover_text("Enter an optional name before saving a bookmark");
+                                        if ui
+                                            .button("Save")
+                                            .on_hover_text("Save current simulation view to local WAL SQLite store")
+                                            .clicked()
+                                        {
+                                            if let Some(store) = &self.store {
+                                                let custom = self.bookmark_name_draft.trim();
+                                                let label = if custom.is_empty() {
+                                                    format!(
+                                                        "{} {} ({:+.1}C)",
+                                                        self.state.year,
+                                                        SEASONS[self.state.season_index.min(11)],
+                                                        self.state.oni_celsius
+                                                    )
+                                                } else {
+                                                    custom.to_string()
+                                                };
+                                                if store.save_bookmark(&label, &self.state).is_ok() {
+                                                    self.saved_bookmarks =
+                                                        store.list_bookmarks().unwrap_or_default();
+                                                    self.bookmark_name_draft.clear();
+                                                    self.status_note =
+                                                        format!("Saved bookmark '{label}' to WAL SQLite store.");
+                                                }
                                             }
                                         }
-                                        if let Some((name, snap)) = restored {
+                                    });
+                                    if self.saved_bookmarks.is_empty() {
+                                        ui.small("No saved bookmarks yet — click Save above.");
+                                    } else {
+                                        let mut restored: Option<(String, SimulationSnapshot)> = None;
+                                        let mut deleted_id: Option<(i64, String)> = None;
+                                        for (id, name, snap) in &self.saved_bookmarks {
+                                            ui.horizontal(|ui| {
+                                                if ui
+                                                    .button(format!("#{id} {name}"))
+                                                    .on_hover_text("Restore saved camera, layer, and historical ENSO date")
+                                                    .clicked()
+                                                {
+                                                    restored = Some((name.clone(), snap.clone()));
+                                                }
+                                                if ui
+                                                    .small_button("Delete")
+                                                    .on_hover_text("Remove this bookmark from SQLite")
+                                                    .clicked()
+                                                {
+                                                    deleted_id = Some((*id, name.clone()));
+                                                }
+                                            });
+                                        }
+                                        if let Some((del_id, del_name)) = deleted_id {
+                                            if let Some(store) = &self.store {
+                                                if store.delete_bookmark(del_id).is_ok() {
+                                                    self.saved_bookmarks =
+                                                        store.list_bookmarks().unwrap_or_default();
+                                                    self.status_note =
+                                                        format!("Deleted bookmark #{del_id} '{del_name}'.");
+                                                }
+                                            }
+                                        } else if let Some((name, snap)) = restored {
                                             self.state = snap;
                                             self.state.field_source = FieldSource::AnalyticalModel;
                                             self.timeline_playing = false;
@@ -1496,6 +1972,68 @@ impl PelagicGlobeApp {
                             );
 
                             ui.separator();
+                            ui.heading("Export CSV & Spilhaus SVG");
+                            ui.horizontal(|ui| {
+                                ui.label("Prefix:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.export_prefix)
+                                        .desired_width(150.0),
+                                )
+                                .on_hover_text("Filename prefix written to working directory");
+                            });
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .button("Export ONI CSV")
+                                    .on_hover_text("Export complete 1950-2026 NOAA CPC ERSSTv6 ONI table to CSV")
+                                    .clicked()
+                                {
+                                    let prefix = if self.export_prefix.trim().is_empty() {
+                                        "pelagic_globe"
+                                    } else {
+                                        self.export_prefix.trim()
+                                    };
+                                    let path = format!("{prefix}_oni_1950_2026.csv");
+                                    match std::fs::write(&path, crate::enso::export_oni_csv()) {
+                                        Ok(()) => {
+                                            self.status_note = format!("Exported NOAA ONI CSV -> {path}");
+                                        }
+                                        Err(e) => {
+                                            self.status_note = format!("CSV export failed: {e}");
+                                        }
+                                    }
+                                }
+                                if ui
+                                    .button("Export Spilhaus SVG")
+                                    .on_hover_text("Export Jacobian-rotated Spilhaus World Ocean SVG for active episode")
+                                    .clicked()
+                                {
+                                    let prefix = if self.export_prefix.trim().is_empty() {
+                                        "pelagic_globe"
+                                    } else {
+                                        self.export_prefix.trim()
+                                    };
+                                    let season = SEASONS[self.state.season_index.min(11)];
+                                    let path = format!(
+                                        "{prefix}_spilhaus_{}_{}.svg",
+                                        self.state.year, season
+                                    );
+                                    let svg = export_spilhaus_svg(
+                                        self.state.year,
+                                        self.state.season_index,
+                                        self.state.oni_celsius,
+                                    );
+                                    match std::fs::write(&path, svg) {
+                                        Ok(()) => {
+                                            self.status_note = format!("Exported Spilhaus SVG -> {path}");
+                                        }
+                                        Err(e) => {
+                                            self.status_note = format!("SVG export failed: {e}");
+                                        }
+                                    }
+                                }
+                            });
+
+                            ui.separator();
                             ui.heading("Major Ocean Currents (14)");
                             for cur in MAJOR_CURRENTS {
                                 let selected =
@@ -1505,12 +2043,43 @@ impl PelagicGlobeApp {
                                         selected,
                                         format!("{} ({})", cur.name, cur.basin),
                                     )
+                                    .on_hover_text(format!("{} | {} — click to inspect & focus camera", cur.transport_sv, cur.enso_response))
                                     .clicked()
                                 {
                                     self.state.selected_current_id = Some(cur.id.to_string());
                                     self.state.yaw_rad = -(cur.focus_lon_deg as f32).to_radians();
                                     self.state.pitch_rad =
                                         (cur.focus_lat_deg as f32).to_radians() * 0.55;
+                                }
+                            }
+
+                            if let Some(cur_id) = self.state.selected_current_id.as_deref() {
+                                if let Some(cur) = MAJOR_CURRENTS.iter().find(|c| c.id == cur_id) {
+                                    ui.add_space(6.0);
+                                    egui::Frame::NONE
+                                        .fill(Color32::from_rgb(15, 32, 54))
+                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(56, 189, 248)))
+                                        .corner_radius(CornerRadius::same(6))
+                                        .inner_margin(8.0)
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                RichText::new(cur.name)
+                                                    .strong()
+                                                    .color(Color32::from_rgb(254, 240, 138)),
+                                            );
+                                            ui.small(format!("Basin: {} | Regime: {:?}", cur.basin, cur.regime));
+                                            ui.small(format!("Transport: {}", cur.transport_sv));
+                                            ui.small(format!("Peak Speed: {:.2} m/s", cur.peak_speed_ms));
+                                            if cur.regime == crate::currents::ThermalRegime::SubsurfaceEquatorial {
+                                                ui.small(
+                                                    RichText::new("Subsurface core (91-200 m): excluded from surface drifter velocity.")
+                                                        .color(Color32::from_rgb(125, 211, 252)),
+                                                );
+                                            }
+                                            ui.small(format!("ENSO Response: {}", cur.enso_response));
+                                            ui.hyperlink_to(cur.source_title, cur.source_url)
+                                                .on_hover_text(cur.source_url);
+                                        });
                                 }
                             }
                         });
@@ -1529,34 +2098,26 @@ impl PelagicGlobeApp {
                                 .color(Color32::from_rgb(186, 230, 253)),
                         );
                         if ui
-                            .button(if self.timeline_playing { "Pause" } else { "Play 1950->2026" })
+                            .button(if self.timeline_playing { "Pause [Space]" } else { "Play 1950->2026 [Space]" })
+                            .on_hover_text("Play or pause chronological 1950-2026 ENSO playback (Hotkey: Space)")
                             .clicked()
                         {
                             self.timeline_playing = !self.timeline_playing;
                             self.timeline_accum_sec = 0.0;
                         }
-                        if ui.button("< Prev").clicked() {
-                            self.timeline_playing = false;
-                            let (py, ps) = if self.state.season_index > 0 {
-                                (self.state.year, self.state.season_index - 1)
-                            } else if self.state.year > START_YEAR {
-                                (self.state.year - 1, latest_valid_season_for_year(self.state.year - 1))
-                            } else {
-                                (END_YEAR, latest_valid_season_for_year(END_YEAR))
-                            };
-                            self.apply_historical_date(py, ps, false, None);
+                        if ui
+                            .button("< Prev")
+                            .on_hover_text("Step back one 3-month ONI season (Hotkey: Left Arrow)")
+                            .clicked()
+                        {
+                            self.step_season(-1);
                         }
-                        if ui.button("Next >").clicked() {
-                            self.timeline_playing = false;
-                            let max_s = latest_valid_season_for_year(self.state.year);
-                            let (ny, ns) = if self.state.season_index < max_s {
-                                (self.state.year, self.state.season_index + 1)
-                            } else if self.state.year < END_YEAR {
-                                (self.state.year + 1, 0)
-                            } else {
-                                (START_YEAR, 0)
-                            };
-                            self.apply_historical_date(ny, ns, false, None);
+                        if ui
+                            .button("Next >")
+                            .on_hover_text("Step forward one 3-month ONI season (Hotkey: Right Arrow)")
+                            .clicked()
+                        {
+                            self.step_season(1);
                         }
                     });
 
@@ -1766,8 +2327,7 @@ impl PelagicGlobeApp {
                 }
             }
             if response.double_clicked() {
-                self.pan_2d = Vec2::ZERO;
-                self.state.zoom = 1.0;
+                self.reset_camera();
             }
             if response.dragged() {
                 let delta = response.drag_delta();
@@ -1802,8 +2362,13 @@ impl PelagicGlobeApp {
                 if morph < 0.95 {
                     painter.circle_filled(
                         center,
+                        radius * (1.045 - 0.12 * morph),
+                        Color32::from_rgba_unmultiplied(36, 112, 198, ((1.0 - morph) * 42.0) as u8),
+                    );
+                    painter.circle_filled(
+                        center,
                         radius * (1.02 - 0.12 * morph),
-                        Color32::from_rgba_unmultiplied(16, 48, 86, 95),
+                        Color32::from_rgba_unmultiplied(16, 48, 86, 105),
                     );
                 }
                 self.render_surface_mesh_3d_or_spilhaus(&painter, rect);
@@ -1834,28 +2399,7 @@ impl PelagicGlobeApp {
             if self.state.show_currents {
                 for &(lon, lat) in &self.drifters {
                     if let Some((p, _)) = self.project_lonlat(lon, lat, rect) {
-                        let anom = if self.state.field_source == FieldSource::SatelliteRaster {
-                            self.active_raster
-                                .as_ref()
-                                .and_then(|g| g.sample_bilinear(lon, lat).map(|s| s.1))
-                                .unwrap_or_else(|| {
-                                    spatial_sst_anomaly_historical(
-                                        lon,
-                                        lat,
-                                        self.state.year,
-                                        self.state.season_index,
-                                        self.state.oni_celsius,
-                                    )
-                                })
-                        } else {
-                            spatial_sst_anomaly_historical(
-                                lon,
-                                lat,
-                                self.state.year,
-                                self.state.season_index,
-                                self.state.oni_celsius,
-                            )
-                        };
+                        let (_sst, anom) = self.sample_effective_sst_anom(lon, lat);
                         let col = if anom > 0.35 {
                             Color32::from_rgba_unmultiplied(251, 146, 60, 210)
                         } else if anom < -0.35 {
@@ -1864,7 +2408,8 @@ impl PelagicGlobeApp {
                             Color32::from_rgba_unmultiplied(167, 243, 208, 175)
                         };
                         let (vx, vy) = self.sample_effective_velocity(lon, lat);
-                        let next_lon = (lon + vx * 2.2).clamp(-179.9, 179.9);
+                        let inv_cos = 1.0 / lat.to_radians().cos().max(0.15);
+                        let next_lon = (lon + vx * 2.2 * inv_cos + 180.0).rem_euclid(360.0) - 180.0;
                         let next_lat = (lat + vy * 2.2).clamp(-84.0, 84.0);
                         if let Some((p_tip, _)) = self.project_lonlat(next_lon, next_lat, rect) {
                             let d = p.distance(p_tip);
@@ -1883,6 +2428,83 @@ impl PelagicGlobeApp {
             self.render_geographic_labels(&painter, rect);
             self.render_docked_spilhaus_inset(&painter, rect);
             self.render_hud_badge_and_colorbar(&painter, rect);
+
+            if let Some(hover_pos) = response.hover_pos() {
+                if let Some((hlon, hlat)) = self.screen_pos_to_lonlat(hover_pos, rect) {
+                    let telem = self.sample_ocean_telemetry(hlon, hlat);
+                    painter.circle_stroke(
+                        hover_pos,
+                        6.0,
+                        Stroke::new(1.2_f32, Color32::from_rgb(250, 204, 21)),
+                    );
+                    let card = Rect::from_min_size(
+                        Pos2::new(rect.left() + 12.0, rect.top() + 92.0),
+                        Vec2::new(294.0, 74.0),
+                    );
+                    if rect.height() > 220.0 {
+                        painter.rect_filled(
+                            card,
+                            CornerRadius::same(6),
+                            Color32::from_rgba_unmultiplied(8, 19, 35, 222),
+                        );
+                        painter.rect_stroke(
+                            card,
+                            CornerRadius::same(6),
+                            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(250, 204, 21, 145)),
+                            egui::StrokeKind::Inside,
+                        );
+                        let lon_dir = if telem.lon_deg >= 0.0 { "E" } else { "W" };
+                        let lat_dir = if telem.lat_deg >= 0.0 { "N" } else { "S" };
+                        let surface_tag = if telem.is_ice {
+                            "Polar Ice"
+                        } else if telem.is_land {
+                            "Land"
+                        } else {
+                            "Ocean"
+                        };
+                        painter.text(
+                            Pos2::new(card.left() + 10.0, card.top() + 14.0),
+                            egui::Align2::LEFT_CENTER,
+                            format!(
+                                "Cursor: {:.2}°{lat_dir}, {:.2}°{lon_dir} [{surface_tag}]",
+                                telem.lat_deg.abs(),
+                                telem.lon_deg.abs()
+                            ),
+                            egui::FontId::proportional(10.5),
+                            Color32::from_rgb(254, 240, 138),
+                        );
+                        let speed = telem.u_ms.hypot(telem.v_ms);
+                        let thermo_txt = match telem.thermo_m {
+                            Some(d) => format!("{d:.0} m"),
+                            None => "Masked (outside Trop. Pac.)".to_string(),
+                        };
+                        painter.text(
+                            Pos2::new(card.left() + 10.0, card.top() + 32.0),
+                            egui::Align2::LEFT_CENTER,
+                            format!(
+                                "SST: {:.1}°C (Δ {:+.2}°C) | |V|: {:.2} m/s",
+                                telem.sst_c, telem.anom_c, speed
+                            ),
+                            egui::FontId::proportional(10.0),
+                            Color32::from_rgb(226, 232, 240),
+                        );
+                        painter.text(
+                            Pos2::new(card.left() + 10.0, card.top() + 48.0),
+                            egui::Align2::LEFT_CENTER,
+                            format!("Flow u/v: {:+.2} / {:+.2} m/s", telem.u_ms, telem.v_ms),
+                            egui::FontId::proportional(10.0),
+                            Color32::from_rgb(167, 243, 208),
+                        );
+                        painter.text(
+                            Pos2::new(card.left() + 10.0, card.top() + 63.0),
+                            egui::Align2::LEFT_CENTER,
+                            format!("20°C Thermocline: {thermo_txt}"),
+                            egui::FontId::proportional(10.0),
+                            Color32::from_rgb(125, 211, 252),
+                        );
+                    }
+                }
+            }
         });
 
         if self.show_about_window {
@@ -2038,7 +2660,7 @@ pub fn render_headless_screenshot(
             snap.spilhaus_morph = 0.0;
             snap.show_spilhaus_overlay = true;
             snap.spilhaus_inset_mode = SpilhausInsetMode::DockedSquare;
-            snap.selected_current_id = Some("equatorial_counter".to_string());
+            snap.selected_current_id = Some("necc_pacific".to_string());
         }
     }
 

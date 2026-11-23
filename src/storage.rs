@@ -62,6 +62,29 @@ impl BookmarkStore {
         })?;
         rows.collect()
     }
+
+    pub fn delete_bookmark(&self, id: i64) -> Result<usize> {
+        self.conn
+            .execute("DELETE FROM saved_views WHERE id = ?1", params![id])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saves_lists_and_deletes_bookmarks() {
+        let store = BookmarkStore::open(":memory:").expect("open in-memory SQLite store");
+        let snap = SimulationSnapshot::default();
+        store.save_bookmark("2026 ASO Test", &snap).unwrap();
+        let list = store.list_bookmarks().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].1, "2026 ASO Test");
+        let deleted = store.delete_bookmark(list[0].0).unwrap();
+        assert_eq!(deleted, 1);
+        assert!(store.list_bookmarks().unwrap().is_empty());
+    }
 }
 
 impl BookmarkStore {

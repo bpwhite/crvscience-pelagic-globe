@@ -394,23 +394,96 @@ pub fn load_raster_from_path<P: AsRef<Path>>(path: P) -> Result<SatelliteRasterG
     } else {
         let raw = fs::read_to_string(p).map_err(|e| e.to_string())?;
         let mut grid = SatelliteRasterGrid::new_empty(180, 90, &p.display().to_string(), "imported-csv");
-        for line in raw.lines().skip(1) {
+        let mut lines = raw.lines().filter(|l| !l.trim().is_empty());
+        let Some(first_line) = lines.next() else {
+            return Err("CSV raster file is empty".to_string());
+        };
+        let header_cols: Vec<String> = first_line
+            .split(',')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .collect();
+        let find_col = |names: &[&str]| -> Option<usize> {
+            header_cols.iter().position(|h| names.iter().any(|n| h == n))
+        };
+        let has_named_header = find_col(&["lat", "latitude"]).is_some()
+            && find_col(&["lon", "longitude"]).is_some();
+
+        let (i_lat, i_lon, i_sst, i_anom, i_u, i_v, i_sla) = if has_named_header {
+            (
+                find_col(&["lat", "latitude"]).unwrap_or(0),
+                find_col(&["lon", "longitude"]).unwrap_or(1),
+                find_col(&["sst", "analysed_sst"]).or(Some(2)),
+                find_col(&["anom", "sst_anom"]).or(Some(3)),
+                find_col(&["u", "ugos", "water_u", "u_current"]),
+                find_col(&["v", "vgos", "water_v", "v_current"]),
+                find_col(&["sla", "ssh"]),
+            )
+        } else {
+            (0, 1, Some(2), Some(3), Some(4), Some(5), Some(6))
+        };
+
+        let mut data_lines: Vec<&str> = Vec::new();
+        if !has_named_header && first_line.split(',').next().and_then(|s| s.trim().parse::<f64>().ok()).is_some() {
+            data_lines.push(first_line);
+        }
+        data_lines.extend(lines);
+
+        for line in data_lines {
             let parts: Vec<&str> = line.split(',').collect();
-            if parts.len() >= 4 {
-                let Ok(lat) = parts[0].trim().parse::<f64>() else { continue };
-                let Ok(lon_raw) = parts[1].trim().parse::<f64>() else { continue };
-                let lon = (lon_raw + 180.0).rem_euclid(360.0) - 180.0;
-                let cx = (((lon + 180.0) / 360.0) * 180.0).floor().clamp(0.0, 179.0) as usize;
-                let cy = (((lat + 90.0) / 180.0) * 90.0).floor().clamp(0.0, 89.0) as usize;
-                let idx = cy * 180 + cx;
-                if let Ok(sst) = parts[2].trim().parse::<f32>() {
-                    grid.sst_c[idx] = sst;
-                    grid.valid_mask[idx] = 1;
+            let Some(lat) = parts.get(i_lat).and_then(|s| s.trim().parse::<f64>().ok()) else {
+                continue;
+            };
+            let Some(lon_raw) = parts.get(i_lon).and_then(|s| s.trim().parse::<f64>().ok()) else {
+                continue;
+            };
+            if !lat.is_finite() || !lon_raw.is_finite() {
+                continue;
+            }
+            let lon = (lon_raw + 180.0).rem_euclid(360.0) - 180.0;
+            let cx = (((lon + 180.0) / 360.0) * 180.0).floor().clamp(0.0, 179.0) as usize;
+            let cy = (((lat + 90.0) / 180.0) * 90.0).floor().clamp(0.0, 89.0) as usize;
+            let idx = cy * 180 + cx;
+
+            let mut populated = false;
+            if let Some(si) = i_sst {
+                if let Some(sst) = parts.get(si).and_then(|s| s.trim().parse::<f32>().ok()) {
+                    if sst.is_finite() && sst > -5.0 && sst < 45.0 {
+                        grid.sst_c[idx] = sst;
+                        populated = true;
+                    }
                 }
-                if let Ok(anom) = parts[3].trim().parse::<f32>() {
-                    grid.anom_c[idx] = anom;
-                    grid.valid_mask[idx] = 1;
+            }
+            if let Some(ai) = i_anom {
+                if let Some(anom) = parts.get(ai).and_then(|s| s.trim().parse::<f32>().ok()) {
+                    if anom.is_finite() && anom > -15.0 && anom < 15.0 {
+                        grid.anom_c[idx] = anom;
+                        populated = true;
+                    }
                 }
+            }
+            if let (Some(ui), Some(vi)) = (i_u, i_v) {
+                if let (Some(u), Some(v)) = (
+                    parts.get(ui).and_then(|s| s.trim().parse::<f32>().ok()),
+                    parts.get(vi).and_then(|s| s.trim().parse::<f32>().ok()),
+                ) {
+                    if u.is_finite() && v.is_finite() && u.abs() < 6.0 && v.abs() < 6.0 {
+                        grid.u_ms[idx] = u;
+                        grid.v_ms[idx] = v;
+                        grid.has_velocity = true;
+                        populated = true;
+                    }
+                }
+            }
+            if let Some(sli) = i_sla {
+                if let Some(sla) = parts.get(sli).and_then(|s| s.trim().parse::<f32>().ok()) {
+                    if sla.is_finite() && sla.abs() < 5.0 {
+                        grid.sla_m[idx] = sla;
+                        populated = true;
+                    }
+                }
+            }
+            if populated {
+                grid.valid_mask[idx] = 1;
             }
         }
         Ok(grid)
@@ -452,5 +525,33 @@ mod tests {
         assert!(!erddap_nesdis_currents_supported("2015-12-15"));
         assert!(erddap_nesdis_currents_supported("2023-12-15"));
         assert!(erddap_nesdis_currents_supported("last"));
+    }
+
+    #[test]
+    fn loads_csv_raster_with_velocity_columns_and_sets_has_velocity() {
+        struct TempFileGuard(std::path::PathBuf);
+        impl Drop for TempFileGuard {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "pelagic_csv_vel_{}_{:?}.csv",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _guard = TempFileGuard(path.clone());
+        let csv = "lat,lon,sst,anom,u,v\n-3.0,-149.0,27.5,0.4,-0.85,0.12\n7.0,-145.0,28.8,1.2,0.92,0.05\n";
+        fs::write(&path, csv).expect("write temporary CSV raster");
+
+        let grid = load_raster_from_path(&path).expect("load CSV raster");
+        assert!(grid.has_velocity, "CSV with u,v columns must set has_velocity == true");
+        assert_eq!(grid.valid_cell_count(), 2);
+        let sample = grid.sample_bilinear(-149.0, -3.0).expect("sample loaded cell");
+        assert!((sample.0 - 27.5).abs() < 0.1);
+        assert!((sample.1 - 0.4).abs() < 0.1);
+        assert!((sample.2 - (-0.85)).abs() < 0.1);
+        assert!((sample.3 - 0.12).abs() < 0.1);
     }
 }

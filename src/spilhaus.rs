@@ -199,6 +199,9 @@ fn conformal_square_inverse(x: f64, y: f64) -> (f64, f64, f64) {
     let (snu, cnu, dnu) = elliptic_j05(K05 - 0.5 * (x + y));
     let (snv, cnv, dnv) = elliptic_j05(0.5 * (x - y));
     let denom = cnv * cnv + 0.5 * snu * snu * snv * snv;
+    if denom.abs() < 1.0e-18 {
+        return (0.0, 0.0, -1.0);
+    }
     let re = cnu * cnv / denom;
     let im = -snu * dnu * snv * dnv / denom;
     let d2 = re * re + im * im;
@@ -227,11 +230,68 @@ pub fn spilhaus_norm_to_lonlat(u_norm: f64, v_norm: f64) -> (f64, f64) {
 
 /// Inverse-projects raw Spilhaus square coordinates `(x, y) ∈ [-K05, K05]²` back to `(lon_deg, lat_deg)`.
 pub fn spilhaus_raw_to_lonlat(x: f64, y: f64) -> (f64, f64) {
-    let (u, v, w) = conformal_square_inverse(x.clamp(-K05, K05), y.clamp(-K05, K05));
+    spilhaus_raw_to_lonlat_unclamped(x.clamp(-K05, K05), y.clamp(-K05, K05))
+}
+
+/// Inverse-projects unclamped raw Spilhaus plane coordinates `(x, y)` (for periodic `3×3` mosaics)
+/// back to `(lon_deg, lat_deg)`.
+pub fn spilhaus_raw_to_lonlat_unclamped(x: f64, y: f64) -> (f64, f64) {
+    let (u, v, w) = conformal_square_inverse(x, y);
     let lam_rot = 2.0 * u.atan2(w);
     let phi_rot = 2.0 * v.atan();
     let (lon_rad, lat_rad) = oblique_rotate_inverse(lam_rot, phi_rot);
     (lon_rad.to_degrees(), lat_rad.to_degrees())
+}
+
+/// Inverse-projects unclamped normalized Spilhaus plane coordinates `(u_norm, v_norm)` (e.g. `[-3, 3]²`)
+/// back to `(lon_deg, lat_deg)`.
+pub fn spilhaus_norm_to_lonlat_unclamped(u_norm: f64, v_norm: f64) -> (f64, f64) {
+    spilhaus_raw_to_lonlat_unclamped(u_norm * K05, v_norm * K05)
+}
+
+/// Rotates geographic surface velocity `(u_east_ms, v_north_ms)` at `(lon_deg, lat_deg)` into
+/// local conformal Spilhaus square coordinates `(vu_spilhaus, vv_spilhaus)` using the
+/// forward projection Jacobian `∂(u, v) / ∂(East, North)`.
+pub fn spilhaus_local_jacobian_velocity(
+    lon_deg: f64,
+    lat_deg: f64,
+    u_east_ms: f64,
+    v_north_ms: f64,
+) -> (f64, f64) {
+    let speed = u_east_ms.hypot(v_north_ms);
+    if speed < 1.0e-6 {
+        return (0.0, 0.0);
+    }
+    let (u0, v0) = lonlat_to_spilhaus_norm(lon_deg, lat_deg);
+    let eps = 0.25_f64;
+    let cos_lat = lat_deg.to_radians().cos().max(0.15);
+    let dlon = eps / cos_lat;
+
+    let (ue_p, ve_p) = lonlat_to_spilhaus_norm(lon_deg + dlon, lat_deg);
+    let (ue_m, ve_m) = lonlat_to_spilhaus_norm(lon_deg - dlon, lat_deg);
+    let de_p = ((ue_p - u0).hypot(ve_p - v0), (ue_p - u0, ve_p - v0));
+    let de_m = ((u0 - ue_m).hypot(v0 - ve_m), (u0 - ue_m, v0 - ve_m));
+    let (du_e, dv_e) = if de_p.0 <= de_m.0 { de_p.1 } else { de_m.1 };
+
+    let lat_p = (lat_deg + eps).clamp(-89.5, 89.5);
+    let lat_m = (lat_deg - eps).clamp(-89.5, 89.5);
+    let (un_p, vn_p) = lonlat_to_spilhaus_norm(lon_deg, lat_p);
+    let (un_m, vn_m) = lonlat_to_spilhaus_norm(lon_deg, lat_m);
+    let dn_p = ((un_p - u0).hypot(vn_p - v0), (un_p - u0, vn_p - v0));
+    let dn_m = ((u0 - un_m).hypot(v0 - vn_m), (u0 - un_m, v0 - vn_m));
+    let (du_n, dv_n) = if dn_p.0 <= dn_m.0 { dn_p.1 } else { dn_m.1 };
+
+    let mag_e = du_e.hypot(dv_e);
+    let mag_n = du_n.hypot(dv_n);
+    if mag_e < 1.0e-9 || mag_n < 1.0e-9 {
+        return (u_east_ms, v_north_ms);
+    }
+    let e_hat = (du_e / mag_e, dv_e / mag_e);
+    let n_hat = (du_n / mag_n, dv_n / mag_n);
+    (
+        u_east_ms * e_hat.0 + v_north_ms * n_hat.0,
+        u_east_ms * e_hat.1 + v_north_ms * n_hat.1,
+    )
 }
 
 /// Samples the Spilhaus boundary cut curve in `(lon_deg, lat_deg)` around the square perimeter.
@@ -297,5 +357,19 @@ mod tests {
             let dlat = (lat - lat2).abs();
             assert!(dlon < 1.0e-7 && dlat < 1.0e-7, "Mismatch for ({lon}, {lat}) -> ({lon2}, {lat2})");
         }
+    }
+
+    #[test]
+    fn jacobian_rotates_velocity_vectors_and_unclamped_mosaic_is_continuous() {
+        let (vu, vv) = spilhaus_local_jacobian_velocity(-145.0, 0.0, 1.0, 0.0);
+        // In Equatorial Pacific (Nino 3.4), Eastward flow rotates obliquely in Spilhaus (u, v) space
+        assert!(vv.abs() > 0.3, "Expected Spilhaus Jacobian to rotate Eastward flow in Equatorial Pacific (got vu={vu:.3}, vv={vv:.3})");
+        assert!((vu.hypot(vv) - 1.0).abs() < 0.05, "Jacobian preserves speed magnitude");
+
+        let (lon_in, lat_in) = spilhaus_norm_to_lonlat_unclamped(0.998, 0.25);
+        let (lon_out, lat_out) = spilhaus_norm_to_lonlat_unclamped(1.002, 0.25);
+        let dlon = ((lon_in - lon_out + 180.0).rem_euclid(360.0) - 180.0).abs();
+        let dlat = (lat_in - lat_out).abs();
+        assert!(dlon < 1.0 && dlat < 1.0, "Unclamped mosaic edge transition must be continuous");
     }
 }
