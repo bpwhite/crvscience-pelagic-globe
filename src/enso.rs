@@ -677,6 +677,112 @@ pub fn export_oni_csv() -> String {
     out
 }
 
+/// Comparative ENSO Niño-3.4, eastern-Pacific upwelling, and 20°C thermocline anomaly
+/// metrics for a historical El Niño / La Niña / Neutral preset episode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnsoDigestRow {
+    pub slug: String,
+    pub title: String,
+    pub year: i32,
+    pub season: String,
+    pub oni_celsius: f64,
+    pub phase: String,
+    pub flavor: String,
+    pub nino34_sst_anom_c: f64,
+    pub nino12_peru_sst_anom_c: f64,
+    pub dateline_sst_anom_c: f64,
+    pub west_pac_thermocline_m: f64,
+    pub east_pac_thermocline_m: f64,
+    pub thermocline_slope_m: f64,
+    pub delta_east_thermocline_vs_neutral_m: f64,
+}
+
+/// Comparative digest across all landmark historical ENSO episodes in `ENSO_PRESETS`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnsoComparativeDigest {
+    pub baseline_slug: String,
+    pub baseline_east_thermocline_m: f64,
+    pub rows: Vec<EnsoDigestRow>,
+}
+
+/// Builds a comparative Niño-3.4 / thermocline anomaly digest across all landmark
+/// historical ENSO episodes (`ENSO_PRESETS`), anchored against the `neutral-1990` baseline.
+pub fn build_enso_comparative_digest() -> EnsoComparativeDigest {
+    let neutral = ENSO_PRESETS
+        .iter()
+        .find(|p| p.slug == "neutral-1990")
+        .unwrap_or(&ENSO_PRESETS[ENSO_PRESETS.len() - 1]);
+    let neutral_east_m =
+        equatorial_20c_isotherm_depth_historical_m(275.0, neutral.year, neutral.oni);
+
+    let rows = ENSO_PRESETS
+        .iter()
+        .map(|p| {
+            let nino34 =
+                spatial_sst_anomaly_historical(-145.0, 0.0, p.year, p.season_index, p.oni);
+            let nino12 =
+                spatial_sst_anomaly_historical(-82.0, -5.0, p.year, p.season_index, p.oni);
+            let dateline =
+                spatial_sst_anomaly_historical(175.0, 0.0, p.year, p.season_index, p.oni);
+            let west_m = equatorial_20c_isotherm_depth_historical_m(150.0, p.year, p.oni);
+            let east_m = equatorial_20c_isotherm_depth_historical_m(275.0, p.year, p.oni);
+            EnsoDigestRow {
+                slug: p.slug.to_string(),
+                title: p.title.to_string(),
+                year: p.year,
+                season: SEASONS[p.season_index.min(11)].to_string(),
+                oni_celsius: p.oni,
+                phase: EnsoPhase::from_oni(p.oni).label().to_string(),
+                flavor: classify_historical_flavor(p.year, p.oni).label().to_string(),
+                nino34_sst_anom_c: nino34,
+                nino12_peru_sst_anom_c: nino12,
+                dateline_sst_anom_c: dateline,
+                west_pac_thermocline_m: west_m,
+                east_pac_thermocline_m: east_m,
+                thermocline_slope_m: west_m - east_m,
+                delta_east_thermocline_vs_neutral_m: east_m - neutral_east_m,
+            }
+        })
+        .collect();
+
+    EnsoComparativeDigest {
+        baseline_slug: neutral.slug.to_string(),
+        baseline_east_thermocline_m: neutral_east_m,
+        rows,
+    }
+}
+
+impl EnsoComparativeDigest {
+    pub fn to_csv(&self) -> String {
+        let mut out = String::from(
+            "slug,year,season,oni_celsius,phase,flavor,nino34_sst_anom_c,nino12_peru_sst_anom_c,dateline_sst_anom_c,west_pac_thermocline_m,east_pac_thermocline_m,thermocline_slope_m,delta_east_thermocline_vs_neutral_m\n",
+        );
+        for r in &self.rows {
+            out.push_str(&format!(
+                "{},{},{},{:+.1},\"{}\",\"{}\",{:.3},{:.3},{:.3},{:.2},{:.2},{:.2},{:+.2}\n",
+                r.slug,
+                r.year,
+                r.season,
+                r.oni_celsius,
+                r.phase,
+                r.flavor,
+                r.nino34_sst_anom_c,
+                r.nino12_peru_sst_anom_c,
+                r.dateline_sst_anom_c,
+                r.west_pac_thermocline_m,
+                r.east_pac_thermocline_m,
+                r.thermocline_slope_m,
+                r.delta_east_thermocline_vs_neutral_m,
+            ));
+        }
+        out
+    }
+
+    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -763,5 +869,56 @@ mod tests {
             .expect("neutral-1990 preset exists");
         assert_eq!(neutral.year, 1990);
         assert_eq!(lookup_oni(neutral.year, neutral.season_index), Some(neutral.oni));
+    }
+
+    #[test]
+    fn comparative_digest_covers_all_presets_with_thermocline_flattening() {
+        let digest = build_enso_comparative_digest();
+        assert_eq!(digest.baseline_slug, "neutral-1990");
+        assert_eq!(digest.rows.len(), ENSO_PRESETS.len());
+
+        let ep1997 = digest
+            .rows
+            .iter()
+            .find(|r| r.slug == "super-1997")
+            .expect("super-1997 row");
+        let ln1973 = digest
+            .rows
+            .iter()
+            .find(|r| r.slug == "lanina-1973")
+            .expect("lanina-1973 row");
+
+        // Strong El Niño deepens eastern Pacific 20°C isotherm & flattens west-east slope
+        assert!(ep1997.delta_east_thermocline_vs_neutral_m > 50.0);
+        assert!(ln1973.delta_east_thermocline_vs_neutral_m < -5.0);
+        assert!(ln1973.thermocline_slope_m > ep1997.thermocline_slope_m);
+        assert!(ep1997.nino34_sst_anom_c > 2.0);
+        assert!(ln1973.nino34_sst_anom_c < -1.8);
+    }
+
+    #[test]
+    fn comparative_digest_exports_valid_csv_and_json() {
+        let digest = build_enso_comparative_digest();
+        let csv = digest.to_csv();
+        assert!(csv.starts_with("slug,year,season,oni_celsius,"));
+        assert_eq!(csv.lines().count(), ENSO_PRESETS.len() + 1);
+        assert!(csv.contains("modoki-2009"));
+
+        let json_raw = digest.to_json_pretty().expect("serialize ENSO digest");
+        let roundtrip: EnsoComparativeDigest =
+            serde_json::from_str(&json_raw).expect("deserialize ENSO digest");
+        assert_eq!(roundtrip.rows.len(), ENSO_PRESETS.len());
+    }
+
+    #[test]
+    fn enso_phase_classification_boundaries_are_consistent() {
+        assert_eq!(EnsoPhase::from_oni(2.1), EnsoPhase::SuperElNino);
+        assert_eq!(EnsoPhase::from_oni(1.6), EnsoPhase::StrongElNino);
+        assert_eq!(EnsoPhase::from_oni(1.1), EnsoPhase::ModerateElNino);
+        assert_eq!(EnsoPhase::from_oni(0.6), EnsoPhase::WeakElNino);
+        assert_eq!(EnsoPhase::from_oni(0.0), EnsoPhase::Neutral);
+        assert_eq!(EnsoPhase::from_oni(-0.7), EnsoPhase::WeakLaNina);
+        assert_eq!(EnsoPhase::from_oni(-1.2), EnsoPhase::ModerateLaNina);
+        assert_eq!(EnsoPhase::from_oni(-1.9), EnsoPhase::StrongLaNina);
     }
 }

@@ -39,7 +39,8 @@ All keyboard shortcuts are guarded by `!ctx.wants_keyboard_input()` so typing in
 | `Left` / `Right` | Step 1 season back / forward | Advances or rewinds 3-month ONI window |
 | `1` / `2` / `3` | Switch view mode | `1` = 3D Globe, `2` = 2D World Map, `3` = Spilhaus Square |
 | `R` | Reset camera | Resets yaw (`2.55 rad`), pitch (`0.14 rad`), pan, and zoom |
-| `F1` / `Esc` | Toggle / Close About dialog | Displays GPL-3.0-or-later and repository metadata |
+| `Ctrl+K` | Open fuzzy Command Palette | Quick-jump Globe/Spilhaus morph, historical ENSO flavors, `20°C` thermocline overlay, and exports |
+| `F1` / `Esc` | Toggle / Close modals | Dismisses Command Palette (`Ctrl+K`) or About dialog (`F1`) |
 
 ## CLI Flags
 
@@ -50,6 +51,8 @@ All keyboard shortcuts are guarded by `!ctx.wants_keyboard_input()` so typing in
 | `--self-test` | `false` | Run headless Spilhaus, mesh, and thermocline diagnostic checks and exit |
 | `--project-coord <lon,lat>` | — | Project `lon,lat` into normalized Spilhaus `(u, v)` and round-trip inverse |
 | `--dump-oni-csv <path>` | — | Write embedded 1950–2026 NOAA CPC ERSSTv6 ONI table as CSV and exit |
+| `--dump-enso-digest-csv <path>` | — | Export comparative Niño-3.4 / eastern-Pacific `20°C` thermocline anomaly digest across historical ENSO events as CSV |
+| `--dump-enso-digest-json <path>` | — | Export comparative Niño-3.4 / thermocline anomaly digest across historical ENSO events as JSON |
 | `--export-spilhaus-svg <path>` | — | Export Jacobian-rotated Spilhaus World Ocean SVG (`ESRI:54099`) and exit |
 | `--fetch-erddap <date\|last>` | — | Fetch live NOAA OISST v2.1 + NESDIS currents for `YYYY-MM-DD` or `last` |
 | `--erddap-stride <2..16>` | `8` | Subsampling stride on `0.25°` ERDDAP grids (`4` = `1.0°`, `8` = `2.0°`) |
@@ -77,7 +80,7 @@ cargo run --release -- --headless-screenshot validation/headless_screenshot.png 
 
 ## Validation & Quality Metrics
 
-- **Automated Tests (`cargo test --all-targets`)**: `18/18` passing (`17` library unit tests + `1` CLI parser test; `0` failed, `0` ignored), covering Spilhaus origin/seam/round-trip accuracy, Jacobian velocity vector rotation & unclamped `3×3` mosaic continuity, historical ENSO flavor spatial separation, tropical Pacific `20°C` thermocline masking & `neutral-1990` preset consistency, Cromwell EUC surface exclusion (`u < -0.35 m/s` at `(-150°, -3°)`), ERDDAP `0–360°` & CSV `u,v` raster ingestion (`has_velocity == true`), WGSL shader layer dispatch, and SQLite WAL bookmark CRUD.
+- **Automated Tests (`cargo test --all-targets`)**: `27/27` passing (`24` library unit tests + `3` CLI parser tests; `0` failed, `0` ignored), covering Spilhaus origin/seam/round-trip accuracy, Jacobian velocity vector rotation & unclamped `3×3` mosaic continuity, historical ENSO flavor spatial separation & Niño-3.4 / thermocline comparative digest CSV/JSON export, tropical Pacific `20°C` thermocline masking & `neutral-1990` preset consistency, Cromwell EUC surface exclusion (`u < -0.35 m/s` at `(-150°, -3°)`), `Ctrl+K` fuzzy command palette actions, ERDDAP `0–360°` & CSV `u,v` raster ingestion (`has_velocity == true`), WGSL shader layer dispatch, and SQLite WAL bookmark CRUD.
 - **Validation Artifacts**: See [validation/pelagic_globe_validation_summary.json](validation/pelagic_globe_validation_summary.json), `1600×1000` headless renders in `validation/`, companion preprint [`Preprints/`](Preprints/README.md) (`APP-PREPRINT-22`, Zenodo Concept DOI [`10.5281/zenodo.24442089`](https://doi.org/10.5281/zenodo.24442089)), and [`CITATION.cff`](CITATION.cff).
 
 ## License & Attribution

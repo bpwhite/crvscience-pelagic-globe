@@ -22,10 +22,10 @@ use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, RichText, Sense, Str
 use crate::coastlines::{WorldLandMask, CONTINENT_POLYLINES};
 use crate::currents::{sample_velocity_ms, MAJOR_CURRENTS};
 use crate::enso::{
-    classify_historical_flavor, climatological_sst_c, equatorial_20c_isotherm_depth_historical_m,
-    latest_valid_season_for_year, lookup_oni, lookup_oni_clamped, spatial_sst_anomaly_historical,
-    tropical_pacific_20c_isotherm_depth_m, EnsoPhase, END_YEAR, ENSO_PRESETS, NINO_BOXES, SEASONS,
-    START_YEAR,
+    build_enso_comparative_digest, classify_historical_flavor, climatological_sst_c,
+    equatorial_20c_isotherm_depth_historical_m, latest_valid_season_for_year, lookup_oni,
+    lookup_oni_clamped, spatial_sst_anomaly_historical, tropical_pacific_20c_isotherm_depth_m,
+    EnsoPhase, END_YEAR, ENSO_PRESETS, NINO_BOXES, SEASONS, START_YEAR,
 };
 use crate::raster::{
     erddap_oisst_supported, fetch_live_noaa_erddap, FieldSource, SatelliteRasterGrid,
@@ -255,6 +255,9 @@ pub struct PelagicGlobeApp {
     export_prefix: String,
     status_note: String,
     pub show_about_window: bool,
+    pub command_palette_open: bool,
+    command_palette_just_opened: bool,
+    command_palette_query: String,
 }
 
 impl PelagicGlobeApp {
@@ -372,6 +375,9 @@ impl PelagicGlobeApp {
             export_prefix: "pelagic_globe".to_string(),
             status_note,
             show_about_window: false,
+            command_palette_open: false,
+            command_palette_just_opened: false,
+            command_palette_query: String::new(),
         }
     }
 
@@ -1543,14 +1549,24 @@ impl PelagicGlobeApp {
             let mut key_step: isize = 0;
             let mut key_view: Option<MapViewMode> = None;
             let mut key_reset = false;
-            ctx.input(|i| {
+            let mut toggle_palette = false;
+            ctx.input_mut(|i| {
+                let cmd_k = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
+                if i.consume_shortcut(&cmd_k) {
+                    toggle_palette = true;
+                }
                 if i.key_pressed(egui::Key::F1) {
                     self.show_about_window = !self.show_about_window;
                 }
-                if i.key_pressed(egui::Key::Escape) && self.show_about_window {
-                    self.show_about_window = false;
+                if i.key_pressed(egui::Key::Escape) {
+                    if self.command_palette_open {
+                        self.command_palette_open = false;
+                        self.command_palette_just_opened = false;
+                    } else if self.show_about_window {
+                        self.show_about_window = false;
+                    }
                 }
-                if !wants_kb {
+                if !wants_kb && !toggle_palette {
                     if i.key_pressed(egui::Key::Space) {
                         key_play_pause = true;
                     }
@@ -1571,6 +1587,10 @@ impl PelagicGlobeApp {
                     }
                 }
             });
+            if toggle_palette {
+                self.command_palette_open = !self.command_palette_open;
+                self.command_palette_just_opened = self.command_palette_open;
+            }
             if key_play_pause {
                 self.timeline_playing = !self.timeline_playing;
                 self.timeline_accum_sec = 0.0;
@@ -1695,6 +1715,14 @@ impl PelagicGlobeApp {
                 ui.separator();
                 if ui.button("About [F1]").clicked() {
                     self.show_about_window = !self.show_about_window;
+                }
+                if ui
+                    .selectable_label(self.command_palette_open, "Palette [Ctrl+K]")
+                    .on_hover_text("Fuzzy quick-jump palette for Globe/Spilhaus morph, ENSO flavors, thermocline layers, and exports")
+                    .clicked()
+                {
+                    self.command_palette_open = !self.command_palette_open;
+                    self.command_palette_just_opened = self.command_palette_open;
                 }
             });
         });
@@ -2031,6 +2059,42 @@ impl PelagicGlobeApp {
                                         }
                                     }
                                 }
+                            });
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .button("Export Digest CSV")
+                                    .on_hover_text("Export Niño-3.4 & 20°C thermocline comparative digest across all historical ENSO flavors")
+                                    .clicked()
+                                {
+                                    self.export_enso_digest_file(true);
+                                }
+                                if ui
+                                    .button("Export Digest JSON")
+                                    .on_hover_text("Export Niño-3.4 & 20°C thermocline comparative digest as structured JSON")
+                                    .clicked()
+                                {
+                                    self.export_enso_digest_file(false);
+                                }
+                            });
+                            ui.collapsing("ENSO Flavor & Thermocline Digest", |ui| {
+                                let digest = build_enso_comparative_digest();
+                                egui::Grid::new("pelagic_enso_digest_grid")
+                                    .striped(true)
+                                    .spacing([6.0, 2.0])
+                                    .show(ui, |ui| {
+                                        ui.small(RichText::new("Episode").strong());
+                                        ui.small(RichText::new("ONI").strong());
+                                        ui.small(RichText::new("N3.4").strong());
+                                        ui.small(RichText::new("E.20°C").strong());
+                                        ui.end_row();
+                                        for row in digest.rows.iter().take(6) {
+                                            ui.small(&row.slug);
+                                            ui.small(format!("{:+.1}°", row.oni_celsius));
+                                            ui.small(format!("{:+.2}°", row.nino34_sst_anom_c));
+                                            ui.small(format!("{:.0}m", row.east_pac_thermocline_m));
+                                            ui.end_row();
+                                        }
+                                    });
                             });
 
                             ui.separator();
@@ -2507,6 +2571,7 @@ impl PelagicGlobeApp {
             }
         });
 
+        self.render_command_palette(ctx);
         if self.show_about_window {
             let mut open = self.show_about_window;
             egui::Window::new("About PelagicGlobe")
@@ -2545,6 +2610,369 @@ impl PelagicGlobeApp {
             }
         }
     }
+
+    fn export_enso_digest_file(&mut self, as_csv: bool) {
+        let prefix = if self.export_prefix.trim().is_empty() {
+            "pelagic_globe"
+        } else {
+            self.export_prefix.trim()
+        };
+        let digest = build_enso_comparative_digest();
+        if as_csv {
+            let path = format!("{prefix}_enso_digest.csv");
+            match std::fs::write(&path, digest.to_csv()) {
+                Ok(()) => self.status_note = format!("Exported ENSO comparative digest CSV -> {path}"),
+                Err(e) => self.status_note = format!("Digest CSV export failed: {e}"),
+            }
+        } else {
+            let path = format!("{prefix}_enso_digest.json");
+            match digest.to_json_pretty().and_then(|j| {
+                std::fs::write(&path, j).map_err(serde_json::Error::io)
+            }) {
+                Ok(()) => self.status_note = format!("Exported ENSO comparative digest JSON -> {path}"),
+                Err(e) => self.status_note = format!("Digest JSON export failed: {e}"),
+            }
+        }
+    }
+
+    fn build_palette_entries(&self) -> Vec<PelagicPaletteEntry> {
+        let mut entries = vec![
+            PelagicPaletteEntry {
+                category: "Morph",
+                title: "3D Ocean Globe (0% Spilhaus Morph)".into(),
+                subtitle: "Switch to interactive rotating 3D sphere (Hotkey: 1)".into(),
+                action: PelagicPaletteAction::SetMorph(MapViewMode::Globe3D, 0.0),
+            },
+            PelagicPaletteEntry {
+                category: "Morph",
+                title: "2D Equirectangular World Map".into(),
+                subtitle: "Switch to global equirectangular projection (Hotkey: 2)".into(),
+                action: PelagicPaletteAction::SetMorph(MapViewMode::WorldMap2D, 0.0),
+            },
+            PelagicPaletteEntry {
+                category: "Morph",
+                title: "Hybrid 50% Globe <-> Spilhaus Morph".into(),
+                subtitle: "Set mid-morph transition between 3D sphere and Spilhaus square".into(),
+                action: PelagicPaletteAction::SetMorph(MapViewMode::Globe3D, 0.5),
+            },
+            PelagicPaletteEntry {
+                category: "Morph",
+                title: "Conformal Spilhaus World Ocean Square (100% Morph)".into(),
+                subtitle: "Full ESRI:54099 Spilhaus World Ocean projection (Hotkey: 3)".into(),
+                action: PelagicPaletteAction::SetMorph(MapViewMode::SpilhausSquare, 1.0),
+            },
+            PelagicPaletteEntry {
+                category: "Inset",
+                title: "Spilhaus Inset: Docked Square".into(),
+                subtitle: "Render synchronized ESRI:54099 square inset in bottom-right".into(),
+                action: PelagicPaletteAction::SetInset(SpilhausInsetMode::DockedSquare),
+            },
+            PelagicPaletteEntry {
+                category: "Inset",
+                title: "Spilhaus Inset: 3x3 Periodic Mosaic".into(),
+                subtitle: "Render 3x3 tiled Adams/Spilhaus conformal mosaic inset".into(),
+                action: PelagicPaletteAction::SetInset(SpilhausInsetMode::Mosaic3x3),
+            },
+            PelagicPaletteEntry {
+                category: "Inset",
+                title: "Spilhaus Inset: Hidden".into(),
+                subtitle: "Hide the bottom-right Spilhaus inset panel".into(),
+                action: PelagicPaletteAction::SetInset(SpilhausInsetMode::Hidden),
+            },
+            PelagicPaletteEntry {
+                category: "Layer",
+                title: "Layer: 20°C Thermocline Depth (m)".into(),
+                subtitle: "Tropical Pacific 20°C isotherm overlay (120°E–80°W, |lat|<=20°)".into(),
+                action: PelagicPaletteAction::SetLayer(DataLayer::ThermoclineDepth),
+            },
+            PelagicPaletteEntry {
+                category: "Layer",
+                title: "Layer: ENSO SST Anomaly (Δ°C)".into(),
+                subtitle: "Diverging sea-surface temperature anomaly vs climatology".into(),
+                action: PelagicPaletteAction::SetLayer(DataLayer::EnsoSstAnomaly),
+            },
+            PelagicPaletteEntry {
+                category: "Layer",
+                title: "Layer: Surface Current Velocity (m/s)".into(),
+                subtitle: "Mixed-layer geostrophic & wind-driven flow speed".into(),
+                action: PelagicPaletteAction::SetLayer(DataLayer::CurrentVelocity),
+            },
+            PelagicPaletteEntry {
+                category: "Layer",
+                title: "Layer: Absolute Sea Surface Temperature (°C)".into(),
+                subtitle: "Seasonal climatology + historical ENSO/heatwave SST".into(),
+                action: PelagicPaletteAction::SetLayer(DataLayer::AbsoluteSst),
+            },
+            PelagicPaletteEntry {
+                category: "Overlay",
+                title: "Toggle NOAA Niño 1+2 / 3 / 3.4 / 4 Monitoring Boxes".into(),
+                subtitle: "Show or hide official equatorial Pacific monitoring boxes".into(),
+                action: PelagicPaletteAction::ToggleNinoBoxes,
+            },
+            PelagicPaletteEntry {
+                category: "Overlay",
+                title: "Toggle Spilhaus Boundary Cut Seam & Grid".into(),
+                subtitle: "Show or hide East Asia – Bering Strait – South America cut seam".into(),
+                action: PelagicPaletteAction::ToggleSpilhausSeam,
+            },
+            PelagicPaletteEntry {
+                category: "Overlay",
+                title: "Toggle Lagrangian Current Drifters (4,200 RK2)".into(),
+                subtitle: "Show or hide animated surface current ribbons".into(),
+                action: PelagicPaletteAction::ToggleCurrents,
+            },
+            PelagicPaletteEntry {
+                category: "Export",
+                title: "Export ENSO Niño-3.4 / Thermocline Digest CSV".into(),
+                subtitle: "Write comparative CSV across all historical El Niño / La Niña presets".into(),
+                action: PelagicPaletteAction::ExportDigestCsv,
+            },
+            PelagicPaletteEntry {
+                category: "Export",
+                title: "Export ENSO Niño-3.4 / Thermocline Digest JSON".into(),
+                subtitle: "Write structured comparative JSON across all historical ENSO presets".into(),
+                action: PelagicPaletteAction::ExportDigestJson,
+            },
+            PelagicPaletteEntry {
+                category: "Export",
+                title: "Export 1950–2026 NOAA ONI CSV".into(),
+                subtitle: "Write full ERSSTv6 3-month ONI historical table".into(),
+                action: PelagicPaletteAction::ExportOniCsv,
+            },
+            PelagicPaletteEntry {
+                category: "Export",
+                title: "Export Conformal Spilhaus SVG".into(),
+                subtitle: "Write Jacobian-rotated Spilhaus World Ocean SVG".into(),
+                action: PelagicPaletteAction::ExportSpilhausSvg,
+            },
+        ];
+
+        for preset in ENSO_PRESETS {
+            let flavor = classify_historical_flavor(preset.year, preset.oni).label();
+            entries.push(PelagicPaletteEntry {
+                category: "ENSO",
+                title: format!("{} [{}]", preset.title, preset.slug),
+                subtitle: format!("{flavor} — {}", preset.summary),
+                action: PelagicPaletteAction::SelectPreset(preset.slug),
+            });
+        }
+        entries
+    }
+
+    fn apply_palette_action(&mut self, action: &PelagicPaletteAction) {
+        match action {
+            PelagicPaletteAction::SetMorph(mode, morph) => {
+                self.view_mode = *mode;
+                self.state.spilhaus_morph = *morph;
+                if *mode == MapViewMode::WorldMap2D {
+                    self.pan_2d = Vec2::ZERO;
+                }
+            }
+            PelagicPaletteAction::SetInset(inset) => {
+                self.state.spilhaus_inset_mode = *inset;
+            }
+            PelagicPaletteAction::SetLayer(layer) => {
+                self.state.data_layer = *layer;
+            }
+            PelagicPaletteAction::ToggleNinoBoxes => {
+                self.state.show_nino_boxes = !self.state.show_nino_boxes;
+            }
+            PelagicPaletteAction::ToggleSpilhausSeam => {
+                self.state.show_spilhaus_overlay = !self.state.show_spilhaus_overlay;
+            }
+            PelagicPaletteAction::ToggleCurrents => {
+                self.state.show_currents = !self.state.show_currents;
+            }
+            PelagicPaletteAction::SelectPreset(slug) => {
+                if let Some(p) = ENSO_PRESETS.iter().find(|p| p.slug == *slug) {
+                    self.timeline_playing = false;
+                    self.apply_historical_date(
+                        p.year,
+                        p.season_index,
+                        true,
+                        Some(p.summary.to_string()),
+                    );
+                }
+            }
+            PelagicPaletteAction::ExportDigestCsv => {
+                self.export_enso_digest_file(true);
+            }
+            PelagicPaletteAction::ExportDigestJson => {
+                self.export_enso_digest_file(false);
+            }
+            PelagicPaletteAction::ExportOniCsv => {
+                let prefix = if self.export_prefix.trim().is_empty() {
+                    "pelagic_globe"
+                } else {
+                    self.export_prefix.trim()
+                };
+                let path = format!("{prefix}_oni_1950_2026.csv");
+                match std::fs::write(&path, crate::enso::export_oni_csv()) {
+                    Ok(()) => self.status_note = format!("Exported NOAA ONI CSV -> {path}"),
+                    Err(e) => self.status_note = format!("CSV export failed: {e}"),
+                }
+            }
+            PelagicPaletteAction::ExportSpilhausSvg => {
+                let prefix = if self.export_prefix.trim().is_empty() {
+                    "pelagic_globe"
+                } else {
+                    self.export_prefix.trim()
+                };
+                let season = SEASONS[self.state.season_index.min(11)];
+                let path = format!("{prefix}_spilhaus_{}_{}.svg", self.state.year, season);
+                let svg = export_spilhaus_svg(
+                    self.state.year,
+                    self.state.season_index,
+                    self.state.oni_celsius,
+                );
+                match std::fs::write(&path, svg) {
+                    Ok(()) => self.status_note = format!("Exported Spilhaus SVG -> {path}"),
+                    Err(e) => self.status_note = format!("SVG export failed: {e}"),
+                }
+            }
+        }
+    }
+
+    fn render_command_palette(&mut self, ctx: &egui::Context) {
+        if !self.command_palette_open {
+            return;
+        }
+        let mut keep_open = true;
+        let enter_pressed = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+        let entries = self.build_palette_entries();
+        let q = self.command_palette_query.trim();
+        let mut scored: Vec<(i32, usize)> = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, e)| {
+                let hay = format!("{} {} {}", e.category, e.title, e.subtitle);
+                fuzzy_match_score(q, &hay).map(|s| (s, idx))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+        let mut activated: Option<PelagicPaletteAction> = None;
+        egui::Window::new("Quick-Jump Ocean & ENSO Palette (Ctrl+K)")
+            .open(&mut keep_open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(540.0)
+            .anchor(egui::Align2::CENTER_TOP, Vec2::new(0.0, 48.0))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Search:").strong());
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.command_palette_query)
+                            .id(egui::Id::new("pelagic_command_palette_input"))
+                            .hint_text("Type Spilhaus morph, ENSO flavor, thermocline, or export...")
+                            .desired_width(420.0),
+                    );
+                    if self.command_palette_just_opened {
+                        resp.request_focus();
+                        self.command_palette_just_opened = false;
+                    }
+                    if ui.small_button("Clear").clicked() {
+                        self.command_palette_query.clear();
+                        resp.request_focus();
+                    }
+                });
+                ui.separator();
+
+                let first_match = scored.first().map(|&(_, idx)| entries[idx].action.clone());
+                egui::ScrollArea::vertical()
+                    .max_height(340.0)
+                    .show(ui, |ui| {
+                        if scored.is_empty() {
+                            ui.small("No matching Spilhaus modes, ENSO episodes, overlays, or exports.");
+                        } else {
+                            for &(_, idx) in scored.iter().take(16) {
+                                let entry = &entries[idx];
+                                let resp = ui
+                                    .selectable_label(
+                                        false,
+                                        format!("[{}] {}", entry.category, entry.title),
+                                    )
+                                    .on_hover_text(&entry.subtitle);
+                                ui.small(
+                                    RichText::new(&entry.subtitle)
+                                        .color(Color32::from_rgb(148, 163, 184)),
+                                );
+                                ui.add_space(2.0);
+                                if resp.clicked() {
+                                    activated = Some(entry.action.clone());
+                                }
+                            }
+                        }
+                    });
+
+                if activated.is_none() && enter_pressed {
+                    activated = first_match;
+                }
+            });
+
+        if !keep_open {
+            self.command_palette_open = false;
+            self.command_palette_just_opened = false;
+        }
+        if let Some(action) = activated {
+            self.apply_palette_action(&action);
+            self.command_palette_open = false;
+            self.command_palette_just_opened = false;
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PelagicPaletteAction {
+    SetMorph(MapViewMode, f32),
+    SetInset(SpilhausInsetMode),
+    SetLayer(DataLayer),
+    ToggleNinoBoxes,
+    ToggleSpilhausSeam,
+    ToggleCurrents,
+    SelectPreset(&'static str),
+    ExportDigestCsv,
+    ExportDigestJson,
+    ExportOniCsv,
+    ExportSpilhausSvg,
+}
+
+#[derive(Debug, Clone)]
+struct PelagicPaletteEntry {
+    category: &'static str,
+    title: String,
+    subtitle: String,
+    action: PelagicPaletteAction,
+}
+
+fn fuzzy_match_score(query: &str, text: &str) -> Option<i32> {
+    let q = query.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return Some(0);
+    }
+    let t = text.to_ascii_lowercase();
+    if let Some(pos) = t.find(&q) {
+        return Some(1000 - pos as i32);
+    }
+    let mut t_chars = t.char_indices();
+    let mut score = 200i32;
+    let mut prev_idx: Option<usize> = None;
+    for qc in q.chars() {
+        if qc.is_whitespace() {
+            continue;
+        }
+        let found = t_chars.find(|&(_, tc)| tc == qc);
+        match found {
+            Some((idx, _)) => {
+                if let Some(prev) = prev_idx {
+                    score -= (idx.saturating_sub(prev + 1)) as i32;
+                }
+                prev_idx = Some(idx);
+            }
+            None => return None,
+        }
+    }
+    Some(score)
 }
 
 impl eframe::App for PelagicGlobeApp {
@@ -2797,4 +3225,114 @@ pub fn render_headless_screenshot(
     drop(mapped);
     staging.unmap();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_app_key(app: &mut PelagicGlobeApp, ctx: &egui::Context, key: egui::Key, modifiers: egui::Modifiers) {
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    Pos2::ZERO,
+                    Vec2::new(1280.0, 800.0),
+                )),
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }],
+                ..Default::default()
+            },
+            |c| app.ui_step(c, true),
+        );
+    }
+
+    #[test]
+    fn command_palette_ctrl_k_opens_and_switches_spilhaus_morph() {
+        let mut app = PelagicGlobeApp::new_headless(SimulationSnapshot::default(), None);
+        let ctx = egui::Context::default();
+        assert!(!app.command_palette_open);
+
+        run_app_key(&mut app, &ctx, egui::Key::K, egui::Modifiers::COMMAND);
+        assert!(app.command_palette_open, "Ctrl+K must open command palette");
+
+        let entries = app.build_palette_entries();
+        let spilhaus_entry = entries
+            .iter()
+            .filter_map(|e| {
+                let hay = format!("{} {} {}", e.category, e.title, e.subtitle);
+                fuzzy_match_score("spilhaus 100%", &hay).map(|s| (s, e))
+            })
+            .max_by_key(|x| x.0)
+            .expect("matching Spilhaus morph entry")
+            .1
+            .clone();
+        app.apply_palette_action(&spilhaus_entry.action);
+        assert_eq!(app.view_mode, MapViewMode::SpilhausSquare);
+        assert!((app.state.spilhaus_morph - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn command_palette_switches_enso_flavor_and_thermocline_layer() {
+        let mut app = PelagicGlobeApp::new_headless(SimulationSnapshot::default(), None);
+        let entries = app.build_palette_entries();
+
+        let modoki = entries
+            .iter()
+            .filter_map(|e| {
+                let hay = format!("{} {} {}", e.category, e.title, e.subtitle);
+                fuzzy_match_score("modoki-2009", &hay).map(|s| (s, e))
+            })
+            .max_by_key(|x| x.0)
+            .expect("modoki entry")
+            .1
+            .clone();
+        app.apply_palette_action(&modoki.action);
+        assert_eq!(app.state.year, 2009);
+        assert!((app.state.oni_celsius - 1.5).abs() < 1e-6);
+
+        let thermo = entries
+            .iter()
+            .filter_map(|e| {
+                let hay = format!("{} {} {}", e.category, e.title, e.subtitle);
+                fuzzy_match_score("thermocline depth", &hay).map(|s| (s, e))
+            })
+            .max_by_key(|x| x.0)
+            .expect("thermocline entry")
+            .1
+            .clone();
+        app.apply_palette_action(&thermo.action);
+        assert_eq!(app.state.data_layer, DataLayer::ThermoclineDepth);
+    }
+
+    #[test]
+    fn command_palette_escape_and_about_f1_behave_cleanly() {
+        let mut app = PelagicGlobeApp::new_headless(SimulationSnapshot::default(), None);
+        let ctx = egui::Context::default();
+
+        run_app_key(&mut app, &ctx, egui::Key::K, egui::Modifiers::COMMAND);
+        assert!(app.command_palette_open);
+        run_app_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.command_palette_open);
+
+        run_app_key(&mut app, &ctx, egui::Key::F1, egui::Modifiers::NONE);
+        assert!(app.show_about_window);
+        run_app_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.show_about_window);
+    }
+
+    #[test]
+    fn fuzzy_match_scores_subsequences_and_rejects_missing_queries() {
+        assert!(fuzzy_match_score("", "Anything").is_some());
+        let sub = fuzzy_match_score("spilhaus", "Conformal Spilhaus World Ocean Square")
+            .expect("substring match");
+        let seq = fuzzy_match_score("cswo", "Conformal Spilhaus World Ocean Square")
+            .expect("subsequence match");
+        assert!(sub > seq);
+        assert!(fuzzy_match_score("xqzv", "Conformal Spilhaus World Ocean Square").is_none());
+    }
 }

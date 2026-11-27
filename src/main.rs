@@ -23,7 +23,8 @@ use clap::Parser;
 use pelagic_globe::app::{render_headless_screenshot, PelagicGlobeApp};
 use pelagic_globe::currents::MAJOR_CURRENTS;
 use pelagic_globe::enso::{
-    equatorial_20c_isotherm_depth_historical_m, export_oni_csv, EnsoPhase, ENSO_PRESETS, SEASONS,
+    build_enso_comparative_digest, equatorial_20c_isotherm_depth_historical_m, export_oni_csv,
+    EnsoPhase, ENSO_PRESETS, SEASONS,
 };
 use pelagic_globe::globe_wgsl::build_spilhaus_globe_mesh;
 use pelagic_globe::icon::app_egui_icon;
@@ -68,6 +69,14 @@ struct Cli {
     /// Export embedded 1950–2026 NOAA CPC ERSSTv6 ONI table to CSV and exit
     #[arg(long)]
     dump_oni_csv: Option<PathBuf>,
+
+    /// Export Niño-3.4 / thermocline comparative digest across historical ENSO events to CSV and exit
+    #[arg(long)]
+    dump_enso_digest_csv: Option<PathBuf>,
+
+    /// Export Niño-3.4 / thermocline comparative digest across historical ENSO events to JSON and exit
+    #[arg(long)]
+    dump_enso_digest_json: Option<PathBuf>,
 
     /// Export a standalone conformal Spilhaus World Ocean SVG layer for the active ONI state
     #[arg(long)]
@@ -142,24 +151,62 @@ fn main() -> eframe::Result<()> {
     }
 
     if let Some(path) = &cli.dump_oni_csv {
-        fs::write(path, export_oni_csv()).expect("Failed to write ONI CSV");
+        if let Err(err) = fs::write(path, export_oni_csv()) {
+            eprintln!("Failed to write ONI CSV {}: {err}", path.display());
+            std::process::exit(1);
+        }
         println!("Wrote 1950-2026 NOAA CPC ONI CSV to {}", path.display());
         return Ok(());
     }
 
+    if let Some(path) = &cli.dump_enso_digest_csv {
+        let digest = build_enso_comparative_digest();
+        if let Err(err) = fs::write(path, digest.to_csv()) {
+            eprintln!("Failed to write ENSO digest CSV {}: {err}", path.display());
+            std::process::exit(1);
+        }
+        println!("Wrote ENSO comparative digest CSV to {}", path.display());
+        return Ok(());
+    }
+
+    if let Some(path) = &cli.dump_enso_digest_json {
+        let digest = build_enso_comparative_digest();
+        match digest.to_json_pretty() {
+            Ok(json) => {
+                if let Err(err) = fs::write(path, json) {
+                    eprintln!("Failed to write ENSO digest JSON {}: {err}", path.display());
+                    std::process::exit(1);
+                }
+            }
+            Err(err) => {
+                eprintln!("Failed to serialize ENSO digest JSON: {err}");
+                std::process::exit(1);
+            }
+        }
+        println!("Wrote ENSO comparative digest JSON to {}", path.display());
+        return Ok(());
+    }
+
     if let Some(path) = &cli.export_spilhaus_svg {
-        fs::write(
+        if let Err(err) = fs::write(
             path,
             export_spilhaus_svg(snapshot.year, snapshot.season_index, snapshot.oni_celsius),
-        )
-        .expect("Failed to write Spilhaus SVG");
+        ) {
+            eprintln!("Failed to write Spilhaus SVG {}: {err}", path.display());
+            std::process::exit(1);
+        }
         println!("Wrote conformal Spilhaus SVG layer to {}", path.display());
         return Ok(());
     }
 
     if let Some(date_str) = &cli.fetch_erddap {
-        let grid = fetch_live_noaa_erddap(date_str, cli.erddap_stride)
-            .expect("NOAA ERDDAP fetch failed");
+        let grid = match fetch_live_noaa_erddap(date_str, cli.erddap_stride) {
+            Ok(g) => g,
+            Err(err) => {
+                eprintln!("NOAA ERDDAP fetch failed: {err}");
+                std::process::exit(1);
+            }
+        };
         println!(
             "Fetched {} ({}x{}, {} valid ocean cells, timestamp={})",
             grid.source_label,
@@ -174,7 +221,13 @@ fn main() -> eframe::Result<()> {
     }
 
     if let Some(raster_path) = &cli.import_raster {
-        let grid = load_raster_from_path(raster_path).expect("Failed to load local raster");
+        let grid = match load_raster_from_path(raster_path) {
+            Ok(g) => g,
+            Err(err) => {
+                eprintln!("Failed to load local raster {}: {err}", raster_path.display());
+                std::process::exit(1);
+            }
+        };
         println!(
             "Imported local raster {} ({}x{}, {} valid cells)",
             grid.source_label,
@@ -239,5 +292,38 @@ mod tests {
             Some(PathBuf::from("validation/headless_screenshot_3.png"))
         );
         assert_eq!(parsed.screenshot_view, 3);
+    }
+
+    #[test]
+    fn cli_parses_enso_digest_export_flags() {
+        let parsed = Cli::try_parse_from([
+            "pelagic-globe",
+            "--dump-enso-digest-csv",
+            "exports/enso_digest.csv",
+            "--dump-enso-digest-json",
+            "exports/enso_digest.json",
+        ])
+        .expect("clap parses ENSO digest flags");
+        assert_eq!(
+            parsed.dump_enso_digest_csv,
+            Some(PathBuf::from("exports/enso_digest.csv"))
+        );
+        assert_eq!(
+            parsed.dump_enso_digest_json,
+            Some(PathBuf::from("exports/enso_digest.json"))
+        );
+    }
+
+    #[test]
+    fn cli_parses_episode_and_negative_oni() {
+        let parsed = Cli::try_parse_from([
+            "pelagic-globe",
+            "--episode",
+            "lanina-1973",
+            "--oni=-2.0",
+        ])
+        .expect("clap parses episode and negative ONI");
+        assert_eq!(parsed.episode.as_deref(), Some("lanina-1973"));
+        assert_eq!(parsed.oni, Some(-2.0));
     }
 }
