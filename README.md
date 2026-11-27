@@ -2,6 +2,8 @@
 
 Native `#![forbid(unsafe_code)]` Rust 3D ocean circulation, conformal **Spilhaus World Ocean Map in a Square** (`ESRI:54099` / `PROJ +proj=spilhaus`), and **NOAA ENSO (El Niño / La Niña)** desktop workstation built on `eframe`/`egui` `0.31`, `wgpu` `24.0` WGSL shaders, `glam` `0.29`, `rusqlite` `0.32` (WAL mode), and `clap` `4.5`.
 
+![PelagicGlobe Workbench](validation/headless_screenshot.png)
+
 ## Documentation
 
 - [User Guide](docs/USER_GUIDE.md) — Workspace walkthrough, interactive controls, live ERDDAP ingestion, bookmarking, and CSV/SVG exports.

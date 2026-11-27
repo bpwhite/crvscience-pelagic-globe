@@ -8,6 +8,8 @@ description = "Native safe-Rust 3D ocean currents globe workstation with conform
 repository = "https://github.com/bpwhite/crvscience-pelagic-globe"
 keywords = ["oceanography", "spilhaus", "enso", "erddap", "wgpu"]
 categories = ["science", "visualization", "simulation", "graphics"]
+homepage = "https://crvscience.com/apps"
+readme = "README.md"
 
 [dependencies]
 bytemuck = { version = "1.21", features = ["derive"] }
